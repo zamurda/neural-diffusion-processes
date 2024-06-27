@@ -37,6 +37,8 @@ tensorflow-datasets = "^4.9.2"
 datasets = "^2.13.1"
 aim = "^3.17.5"
 distrax = "0.1.4"
+tomli = ">=2.0.0"
+absl-py = "2.1.0"
 
 [tool.taskipy.tasks]
 format = """
