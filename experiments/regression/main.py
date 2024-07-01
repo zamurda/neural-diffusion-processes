@@ -1,5 +1,7 @@
-from typing import Mapping, Tuple
+from typing import Mapping, Tuple, Type, TypeVar
+from jaxtyping import Array, PyTree
 import os
+import sys
 import pprint
 import string
 import random
@@ -10,23 +12,16 @@ import haiku as hk
 import jax.numpy as jnp
 import tqdm
 import numpy as np
-import tensorflow as tf
-import tensorflow_datasets as tfds
+# import tensorflow as tf
 import matplotlib.pyplot as plt
 import optax
+import equinox as eqx
 from functools import partial
 from dataclasses import asdict
 
-from gpjax import linops as jaxlinop
-from gpjax.gaussian_distribution import GaussianDistribution
-
-# Disable all GPUs for TensorFlow. Load data using CPU.
-tf.config.set_visible_devices([], 'GPU')
-AUTOTUNE = tf.data.experimental.AUTOTUNE
-
-from ml_tools.config_utils import setup_config
-from ml_tools.state_utils import TrainingState
-from ml_tools import state_utils
+# from ml_tools.config_utils import setup_config
+from ml_tools.checkpointing import TrainingState
+from ml_tools import checkpointing
 from ml_tools import writers
 from ml_tools import actions
 
@@ -34,10 +29,10 @@ import neural_diffusion_processes as ndp
 from neural_diffusion_processes.types import Dataset, Batch, Rng
 from neural_diffusion_processes.model import BiDimensionalAttentionModel
 from neural_diffusion_processes.process import cosine_schedule, GaussianDiffusion
-from neural_diffusion_processes.gp import predict
 
-
-from config import Config
+from absl import flags
+from ml_collections import config_flags
+from config_new import Config, get_config_map, parse_config_map
 
 
 EXPERIMENT = "regression-May29-eval"
@@ -45,6 +40,13 @@ EXPERIMENT_NAME = None
 DATETIME = datetime.datetime.now().strftime("%b%d_%H%M%S")
 HERE = pathlib.Path(__file__).parent
 LOG_DIR = 'logs'
+
+class TrainingState(eqx.Module):
+    params: PyTree
+    params_ema: PyTree
+    opt_state: optax.OptState
+    key: Array
+    step: Array
 
 
 def get_experiment_name(config: Config):
@@ -81,33 +83,51 @@ def get_experiment_dir(config: Config, output: str = "root", exist_ok: bool = Tr
 
 
 def get_data(
-    dataset: str,
-    input_dim: int = 1,
-    train: bool = True,
-    batch_size: int = 1024,
-    num_epochs: int = 1,
-) -> Dataset:
+        dataset: str,
+        input_dim: int = 1,
+        train: bool = True,
+        batch_size: int = 1024,
+        num_epochs: int = 1,
+    ) -> Dataset:
     task = "training" if train else "interpolation"    
-    data = np.load(f"data/{dataset}_{input_dim}_{task}.npz")
-    ds = tf.data.Dataset.from_tensor_slices({
-        "x_target": data["x_target"].astype(np.float32),
-        "y_target": data["y_target"].astype(np.float32),
-        "x_context": data["x_context"].astype(np.float32),
-        "y_context": data["y_context"].astype(np.float32),
-        "mask_context": data["mask_context"].astype(np.float32),
-        # "mask_target": data["mask_target"].astype(np.float32),
-    })
-    if train:
-        ds = ds.repeat(count=num_epochs)
-        ds = ds.shuffle(seed=42, buffer_size=1000)
-    ds = ds.batch(batch_size, drop_remainder=True)
-    ds = ds.prefetch(AUTOTUNE)
-    ds = ds.as_numpy_iterator()
-    return map(lambda d: Batch(**d), ds)
+    data = jnp.load(f"data/{dataset}_{input_dim}_{task}.npz")
+    
+    num_samples = data['mask_context'].shape[0]
+    key = jax.random.key(seed=53)
+    # repeat arange(num_samples) num_epochs times
+    # do the shuffling
+    indices = jax.random.permutation(key, jnp.arange(num_samples).repeat(num_epochs))
+
+    # batch up the indices using reshape()
+    batched_ind = indices.reshape(-1, batch_size)
+
+    # reorder each array according to the new index
+    # maybe jit a lambda func and go from there?
+    # reorder = partial(lambda ind, arr: arr[ind,:,:] if len(arr.shape) == 3 else arr[ind,:], indices)
+    def make_batch(data: Mapping, indices: jnp.array) -> Batch:
+        x_t = jnp.take(data['x_target'], indices, axis=0)
+        y_t = jnp.take(data['y_target'], indices, axis=0)
+        x_c = jnp.take(data['x_context'], indices, axis=0)
+        y_c = jnp.take(data['y_context'], indices, axis=0)
+        m_t = jnp.take(data['mask_target'], indices, axis=0)
+        m_c = jnp.take(data['mask_context'], indices, axis=0)
+        return Batch(
+            x_target=x_t,
+            y_target=y_t,
+            x_context=x_c,
+            y_context=y_c,
+            mask_context=m_c,
+            mask_target=m_t
+        )
+    jitted_make_batch = jax.jit(partial(make_batch, data))
+    
+    # map jitted_make_batch into batched_indices
+    return map(jitted_make_batch, batched_ind)
 
 
 
-config: Config = setup_config(Config)
+config_map: Mapping = get_config_map()
+config: Config = parse_config_map(config_map)
 key = jax.random.PRNGKey(config.seed)
 beta_t = cosine_schedule(config.diffusion.beta_start, config.diffusion.beta_end, config.diffusion.timesteps)
 process = GaussianDiffusion(beta_t)
@@ -133,15 +153,16 @@ def net(params, t, yt, x, mask, *, key):
 
 def loss_fn(params, batch: Batch, key):
     net_with_params = partial(net, params)
-    kwargs = dict(num_timesteps=config.diffusion.timesteps, loss_type=config.loss_type)
+    kwargs = dict(num_timesteps=config.diffusion.timesteps, loss_type=config.optimizer.loss_type)
     return ndp.process.loss(process, net_with_params, batch, key, **kwargs)
 
-
+NUM_SAMPLES = 2**13 # hardcoded for now
+steps_per_epoch = NUM_SAMPLES // config.training.batch_size
 learning_rate_schedule = optax.warmup_cosine_decay_schedule(
     init_value=config.optimizer.init_lr,
     peak_value=config.optimizer.peak_lr,
-    warmup_steps=config.steps_per_epoch * config.optimizer.num_warmup_epochs,
-    decay_steps=config.steps_per_epoch * config.optimizer.num_decay_epochs,
+    warmup_steps=steps_per_epoch * config.optimizer.num_warmup_epochs,
+    decay_steps=steps_per_epoch * config.optimizer.num_decay_epochs,
     end_value=config.optimizer.end_lr,
 )
 
@@ -217,7 +238,7 @@ def sample_conditional(state: TrainingState, key: Rng):
 
 
 def plots(state: TrainingState, key: Rng):
-    if config.input_dim != 1: return {}  # only plot for 1D inputs
+    if INPUT_DIM != 1: return {}  # only plot for 1D inputs
     # prior
     fig_prior, ax = plt.subplots()
     x, y0 = jax.vmap(lambda k: sample_prior(state, k))(jax.random.split(key, 10))
@@ -230,22 +251,22 @@ def plots(state: TrainingState, key: Rng):
     ax.plot(xc[...,0].T, yc[...,0].T, "C3o")
     return {"prior": fig_prior, "conditional": fig_cond}
 
-
+INPUT_DIM = 1 # hardcode
 batch_init = Batch(
-    x_target=jnp.zeros((config.batch_size, 10, config.input_dim)),
-    y_target=jnp.zeros((config.batch_size, 10, 1)),
-    x_context=jnp.zeros((config.batch_size, 10, config.input_dim)),
-    y_context=jnp.zeros((config.batch_size, 10, 1)),
-    mask_context=jnp.zeros((config.batch_size, 10)),
-    mask_target=jnp.zeros((config.batch_size, 10)),
+    x_target=jnp.zeros((config.training.batch_size, 10, INPUT_DIM)),
+    y_target=jnp.zeros((config.training.batch_size, 10, 1)),
+    x_context=jnp.zeros((config.training.batch_size, 10, INPUT_DIM)),
+    y_context=jnp.zeros((config.training.batch_size, 10, 1)),
+    mask_context=jnp.zeros((config.training.batch_size, 10)),
+    mask_target=jnp.zeros((config.training.batch_size, 10)),
 )
 state = init(batch_init, jax.random.PRNGKey(config.seed))
 
 experiment_dir_if_exists = pathlib.Path(config.restore)
 if (experiment_dir_if_exists / "checkpoints").exists():
-    index = state_utils.find_latest_checkpoint_step_index(str(experiment_dir_if_exists))
+    index = checkpointing.find_latest_checkpoint_step_index(str(experiment_dir_if_exists))
     if index is not None:
-        state = state_utils.load_checkpoint(state, str(experiment_dir_if_exists), step_index=index)
+        state = checkpointing.load_checkpoint(state, str(experiment_dir_if_exists), step_index=index)
         print("Restored checkpoint at step {}".format(state.step))
 
 
@@ -256,6 +277,7 @@ aim_writer = writers.AimWriter(EXPERIMENT)
 writer = writers.MultiWriter([aim_writer, tb_writer, local_writer])
 writer.log_hparams(asdict(config))
 
+total_steps = ((NUM_SAMPLES*config.training.num_epochs)//config.training.batch_size)
 
 actions = [
     actions.PeriodicCallback(
@@ -263,24 +285,24 @@ actions = [
         callback_fn=lambda step, t, **kwargs: writer.write_scalars(step, kwargs["metrics"])
     ),
     actions.PeriodicCallback(
-        every_steps=config.total_steps // 8,
+        every_steps=total_steps // 8,
         callback_fn=lambda step, t, **kwargs: writer.write_figures(step, plots(kwargs["state"], kwargs["key"]))
     ),
     actions.PeriodicCallback(
-        every_steps=config.total_steps // 2,
-        callback_fn=lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], exp_root_dir, step)
+        every_steps=total_steps // 2,
+        callback_fn=lambda step, t, **kwargs: checkpointing.save_checkpoint(kwargs["state"], exp_root_dir, step)
     ),
 ]
 
 ds_train: Dataset = get_data(
-    config.dataset,
-    input_dim=config.input_dim,
+    'se',
+    input_dim=1,
     train=True,
-    batch_size=config.batch_size,
-    num_epochs=config.num_epochs,
+    batch_size=config.training.batch_size,
+    num_epochs=config.training.num_epochs,
 )
 
-steps = range(state.step + 1, config.total_steps + 1)
+steps = range(state.step + 1, total_steps + 1)
 progress_bar = tqdm.tqdm(steps)
 
 for step, batch in zip(progress_bar, ds_train):
@@ -342,7 +364,7 @@ def plot(batch):
     return fig
 
 
-@jax.jit
+'''@jax.jit
 @partial(jax.vmap, in_axes=(None, 0, 0, 0, 0, 0))
 def eval_conditional(key, x_test, y_test, x_context, y_context, mask_context):
     samples = sample_n_conditionals(jax.random.split(key, n_samples), x_test, x_context, y_context, mask_context)
@@ -358,7 +380,7 @@ def eval_conditional(key, x_test, y_test, x_context, y_context, mask_context):
     ll = post.log_prob(y_test.squeeze()) / len(x_test)
     mse = jnp.mean((post.mean() - y_test.squeeze()) ** 2)
     num_context = len(x_context) - jnp.count_nonzero(mask_context)
-    return {"mse": mse, "ll": ll, "nc": num_context}
+    return {"mse": mse, "ll": ll, "nc": num_context}'''
 
 
 def summary_stats(metrics):
@@ -370,7 +392,7 @@ def summary_stats(metrics):
 
 ds_test = get_data(
     config.dataset,
-    input_dim=config.input_dim,
+    input_dim=INPUT_DIM,
     train=False,
     batch_size=config.eval.batch_size,
     num_epochs=1,
@@ -382,14 +404,14 @@ from tqdm.contrib import tenumerate
 
 for i, batch in tenumerate(ds_test, total=128 // config.eval.batch_size):
     key, ekey = jax.random.split(key)
-    m = eval_conditional(ekey, batch.x_target, batch.y_target, batch.x_context, batch.y_context, batch.mask_context)
+    '''m = eval_conditional(ekey, batch.x_target, batch.y_target, batch.x_context, batch.y_context, batch.mask_context)
     for k, v in m.items():
-        metrics[k].append(v)
+        metrics[k].append(v)'''
 
     summary = summary_stats(metrics)
     summary = {"eval_" + k: v for k, v in summary.items()}
     writer.write_scalars(i, summary)
-    if config.input_dim == 1:
+    if INPUT_DIM == 1:
         fig = plot(batch)
         writer.write_figures(i, {"eval_conditional_sample": fig})
 

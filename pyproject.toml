@@ -18,7 +18,7 @@ einops = "^0.6.0"
 check-shapes = "^1.0.0"
 dm-haiku = "^0.0.9"
 typing-extensions = "^4.7.1"
-simple-pytree = "^0.2.2"
+simple-pytree = "<0.2.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.0.247"
@@ -32,9 +32,11 @@ optional = true
 
 [tool.poetry.group.experiments.dependencies]
 tensorboardx = "^2.6.1"
-ml-tools = {git = "https://github.com/vdutor/ml-tools", rev = "main"}
-tensorflow = "^2.16"
-# tensorflow-cpu = "^2.12.0"
+# ml-tools = {git = "https://github.com/vdutor/ml-tools.git", rev = "fb893b380367f2eb1fc54c6bbd019cf482a61077"}
+# ^ this is for using with gpjax 0.5.9
+ml-tools = {git = "https://github.com/vdutor/ml-tools.git", rev = "main"}
+# tensorflow = "2.14.0"  earliest arm64 version
+# tensorflow-cpu = "2.12.0" currently no arm64 sdist/wheel
 # tensorflow-datasets = "^4.9.2"
 datasets = "^2.13.1"
 aim = "^3.17.5"
@@ -42,6 +44,7 @@ distrax = "0.1.4"
 tomli = ">=2.0.0"
 absl-py = "2.1.0"
 scipy = "1.12.0"
+# gpjax = "0.5.9"
 
 [tool.taskipy.tasks]
 format = """

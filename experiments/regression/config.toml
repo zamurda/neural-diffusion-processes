@@ -1,0 +1,16 @@
+[DiffusionConfig]
+schedule = "cosine"
+beta_start = 3e-4
+beta_end = 0.5
+timesteps = 500
+
+[OptimizerConfig]
+num_warmup_epochs = 20
+num_decay_epochs = 200
+init_lr= 2e-5
+peak_lr = 1e-3
+end_lr = 1e-5
+ema_rate = 0.995  # 0.999
+
+[DatasetConfig]
+data = './data/se_1_training.npz'
