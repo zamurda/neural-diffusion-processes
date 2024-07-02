@@ -9,6 +9,10 @@ authors = [
     "Fergus Simpson"
 ]
 license = "Apache-2.0"
+packages = [
+    { include = 'neural_diffusion_processes' },
+    { include = 'util' }
+]
 
 [tool.poetry.dependencies]
 python = "^3.9,<3.11"
