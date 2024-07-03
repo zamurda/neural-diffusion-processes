@@ -41,6 +41,7 @@ class DatasetConfig:
     data: Union[pathlib.Path, str] = None
     features: List[str] = None
     target_index: str = None
+    sample_length: int = 50 # how big should each sampled function draw be?
 
 @dataclass
 class TrainingConfig:
