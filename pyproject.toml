@@ -16,8 +16,15 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.9,<3.11"
-jax = "0.4.13"
-jaxlib = "0.4.13"
+jax-metal = [ { version = '0.1.0', markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" } ]
+jax = [
+    # { version = "0.4.13", markers = "sys_platform != 'darwin'", source = "pypi" },
+    { version = "0.4.26", markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" }
+]
+jaxlib = [
+    # { version = "0.4.13", markers = "sys_platform != 'darwin'", source = "pypi" },
+    { version = "0.4.26", markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" }
+]
 einops = "^0.6.0"
 check-shapes = "^1.0.0"
 dm-haiku = "^0.0.9"
