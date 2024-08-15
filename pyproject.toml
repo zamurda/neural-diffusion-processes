@@ -16,16 +16,6 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.9,<3.11"
-<<<<<<< HEAD
-jax-metal = [ { version = '0.1.0', markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" } ]
-jax = [
-    # { version = "0.4.13", markers = "sys_platform != 'darwin'", source = "pypi" },
-    { version = "0.4.26", markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" }
-]
-jaxlib = [
-    # { version = "0.4.13", markers = "sys_platform != 'darwin'", source = "pypi" },
-    { version = "0.4.26", markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" }
-=======
 # jax-metal = [ { version = '0.1.0', markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" } ]
 jax = [
     # { version = "0.4.13", markers = "sys_platform != 'darwin'", source = "pypi" },
@@ -34,7 +24,6 @@ jax = [
 jaxlib = [
     # { version = "0.4.13", markers = "sys_platform != 'darwin'", source = "pypi" },
     { version = "0.4.19", markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" }
->>>>>>> experiment/wind-data
 ]
 einops = "^0.6.0"
 check-shapes = "^1.0.0"

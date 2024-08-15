@@ -38,7 +38,7 @@ from neural_diffusion_processes.process import cosine_schedule, GaussianDiffusio
 from absl import flags # for training on apple gpu
 flags.DEFINE_bool('metal', False, "whether gpu training should occur")
 
-from util.config_tools import get_config_map, parse_config_map, Config, DatasetConfig
+from util.config_tools import get_config_map, parse_config_map, dict_to_yaml, Config, DatasetConfig
 from util.load_model import init_state_from_pickle
 
 jax.config.update('jax_disable_jit', False) # set true for debugging
@@ -300,7 +300,7 @@ def check_if_fixed(predicate, params_old, params_new) -> bool:
 with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
     writer = csv.writer(csvfile, delimiter=',')
     writer.writerow(['step', 'loss', 'learning_rate'])
-    
+
     for step, batch in zip(progress_bar, ds_train):
         if step < state.step: continue  # wait for the state to catch up in case of restarts
         state, metrics = update_step(state, batch)
@@ -311,3 +311,6 @@ with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
 
         if step % 100 == 0:
             progress_bar.set_description(f"loss {metrics['loss']:.2f}")
+
+print(f'============================ {EXPERIMENT} finished training ===============================')
+dict_to_yaml(cfg_dict, SAVE_HERE/'config.yaml')

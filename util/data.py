@@ -7,10 +7,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import pandas as pd
-<<<<<<< HEAD
-=======
 from einops import rearrange
->>>>>>> experiment/wind-data
 
 from .config_tools import Config, DatasetConfig, TrainingConfig
 from neural_diffusion_processes.types import Batch, Dataset
@@ -21,17 +18,6 @@ def _make_batch(data: Mapping,
                 target_name: str,
                 indices: jnp.array
             ) -> Batch:
-<<<<<<< HEAD
-    
-    features_arr = []
-    for c in colnames:
-        feature = jnp.take(jnp.array(data[c]), indices)
-        features_arr.append(feature)
-    target = jnp.take(jnp.array(data[target_name]), indices)
-    features = jnp.stack(features_arr)
-
-    return Batch(x_target=features, y_target=target)
-=======
     # num_points_bool = jnp.ones(data.shape[0], dtype=bool)
     features_arr = []
     for c in colnames:
@@ -46,7 +32,6 @@ def _make_batch(data: Mapping,
     features = rearrange(features, 'input_dim batch_size seq_len -> batch_size seq_len input_dim')
 
     return Batch(x_target=features, y_target=target[...,None])
->>>>>>> experiment/wind-data
 
 
 
@@ -55,14 +40,9 @@ def gen_dataset_standard(
         dataset_config: DatasetConfig,
         training_config: TrainingConfig,
         seed: int = 53,
-<<<<<<< HEAD
-        drop_remainder: bool = True
-    ) -> Tuple[Dataset, int]:
-=======
         target_is_normalised: Optional[bool] = True,
         sample_contiguous: Optional[bool] = False
     ) -> Tuple[Dataset, int, Mapping]:
->>>>>>> experiment/wind-data
     '''
     Made to read pickled pandas dataframes or CSV files containing samples.
     If data is time-series, then the dataframe must be ORDERED.
@@ -70,10 +50,7 @@ def gen_dataset_standard(
     Returns:
     Dataset - Generator : which can be iterated over in the training loop
     Num_steps - int     : total number of training steps
-<<<<<<< HEAD
-=======
     extras - dict       : dict containing the mean and standard deviation of the target variable (if not already normalised)
->>>>>>> experiment/wind-data
     '''
     # check if data exists
     dir_ = dir_ if isinstance(dir_, pathlib.Path) else pathlib.Path(dir_)
@@ -103,16 +80,6 @@ def gen_dataset_standard(
         key = jax.random.PRNGKey(seed)
         batched_indices = []
         for _ in range((num_samples*training_config.num_epochs)//training_config.batch_size):
-<<<<<<< HEAD
-            key, subkey = jax.random.split(key)
-            # sort the indices so that causal masking can be applied
-            batched_indices.append(
-                jnp.sort(jax.random.choice(
-                    subkey, indices, (dataset_config.sample_length,)
-                        )
-                    )
-                )
-=======
             curr_batch = []
             for __ in range(training_config.batch_size):
                 key, subkey = jax.random.split(key)
@@ -132,16 +99,10 @@ def gen_dataset_standard(
         
         else: mean, std = 0, 0
         
->>>>>>> experiment/wind-data
         jitted_make_batch = jax.jit(
             partial(_make_batch, data, dataset_config.features, dataset_config.target_index)
             )
         
-<<<<<<< HEAD
-        return map(jitted_make_batch, batched_indices), (num_samples*training_config.num_epochs)//training_config.batch_size
-        
-    else: raise ValueError(f'dataset {name} does not exist in {dir_}')
-=======
         return (
             map(jitted_make_batch, batched_indices),
             (num_samples*training_config.num_epochs)//training_config.batch_size,
@@ -236,4 +197,3 @@ def gen_batch_eval(
             return batch_with_ctx
         
         else: return batch_without_ctx
->>>>>>> experiment/wind-data
