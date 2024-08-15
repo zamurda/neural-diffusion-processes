@@ -16,8 +16,15 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.9,<3.11"
-jax = "0.4.13"
-jaxlib = "0.4.13"
+# jax-metal = [ { version = '0.1.0', markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" } ]
+jax = [
+    # { version = "0.4.13", markers = "sys_platform != 'darwin'", source = "pypi" },
+    { version = "0.4.19", markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" }
+]
+jaxlib = [
+    # { version = "0.4.13", markers = "sys_platform != 'darwin'", source = "pypi" },
+    { version = "0.4.19", markers = "sys_platform == 'darwin' and platform_machine == 'arm64'", source = "pypi" }
+]
 einops = "^0.6.0"
 check-shapes = "^1.0.0"
 dm-haiku = "^0.0.9"
@@ -35,7 +42,7 @@ taskipy = "^1.10.3"
 optional = true
 
 [tool.poetry.group.experiments.dependencies]
-tensorboardx = "^2.6.1"
+# tensorboardx = "^2.6.1"
 # ml-tools = {git = "https://github.com/vdutor/ml-tools.git", rev = "fb893b380367f2eb1fc54c6bbd019cf482a61077"}
 # ^ this is for using with gpjax 0.5.9
 ml-tools = {git = "https://github.com/vdutor/ml-tools.git", rev = "main"}
@@ -44,11 +51,19 @@ ml-tools = {git = "https://github.com/vdutor/ml-tools.git", rev = "main"}
 # tensorflow-datasets = "^4.9.2"
 datasets = "^2.13.1"
 aim = "^3.17.5"
-distrax = "0.1.4"
+# distrax = "0.1.4"
 tomli = ">=2.0.0"
 absl-py = "2.1.0"
 scipy = "1.12.0"
 # gpjax = "0.5.9"
+
+[tool.poetry.group.gp]
+optional = true
+
+[tool.poetry.group.gp.dependencies]
+tensorflow-macos = '2.14.0'
+tensorflow-probability = '0.22.1'
+gpflow = '2.9.2'
 
 [tool.taskipy.tasks]
 format = """

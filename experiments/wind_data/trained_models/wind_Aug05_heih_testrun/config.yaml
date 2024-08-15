@@ -1,0 +1,56 @@
+dataset:
+  data: wind_1wk_turbine1_eval_is.pkl
+  features:
+  - Posix.time.sec
+  sample_length: 100
+  target_index: Power.me
+diffusion:
+  beta_end: 0.5
+  beta_start: 0.0003
+  schedule: cosine
+  timesteps: 500
+mask_type: causal
+network:
+  hidden_dim: 64
+  n_layers: 4
+  num_heads: 8
+optimizer:
+  ema_rate: 0.995
+  end_lr: 1.0e-05
+  init_lr: 2.0e-05
+  loss_type: l1
+  num_decay_epochs: 200
+  num_warmup_epochs: 20
+  peak_lr: 0.001
+restore: ''
+schedule:
+  beta_end: 0.5
+  beta_start: 0.0003
+  schedule: cosine
+  timesteps: 500
+seed: 53
+target_transformation:
+  mean: !!python/object/apply:numpy.core.multiarray.scalar
+  - &id001 !!python/object/apply:numpy.dtype
+    args:
+    - f8
+    - false
+    - true
+    state: !!python/tuple
+    - 3
+    - <
+    - null
+    - null
+    - null
+    - -1
+    - -1
+    - 0
+  - !!binary |
+    r5hQvRwRg0A=
+  std: !!python/object/apply:numpy.core.multiarray.scalar
+  - *id001
+  - !!binary |
+    WIIzYdeVgkA=
+training:
+  batch_size: 32
+  num_epochs: 100

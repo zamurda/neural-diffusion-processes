@@ -101,10 +101,10 @@ class MultiHeadAttention(hk.Module):
         "v: [batch..., seq_len_k, dim_v]",
         "k: [batch..., seq_len_k, dim_k]",
         "q: [batch..., seq_len_q, dim_q]",
-        "mask: [broadcast batch..., seq_len_q] if mask is not None",
+        "mask_type: [...]",
         "return: [batch..., seq_len_q, hidden_dim]",
     )
-    def __call__(self, v, k, q, mask=None):
+    def __call__(self, v, k, q, mask_type = jnp.array([[]])):
         q = hk.Linear(output_size=self.d_model)(q)  # (batch_size, seq_len, d_model)
         k = hk.Linear(output_size=self.d_model)(k)  # (batch_size, seq_len, d_model)
         v = hk.Linear(output_size=self.d_model)(v)  # (batch_size, seq_len, d_model)
@@ -115,12 +115,31 @@ class MultiHeadAttention(hk.Module):
         v = rearrange(v, rearrange_arg, num_heads=self.num_heads, depth=self.depth)
 
         # scaled_attention, attention_weights = scaled_dot_product_attention(
-        if mask is not None:
-            mask_seq_q = mask[..., :, None]
-            mask_seq_v = mask[..., None, :]
-            mask = mask_seq_q + mask_seq_v
-            mask = jnp.where(jnp.equal(mask, 0.0), mask, jnp.ones_like(mask))
-            mask = mask[..., None, :, :]  # add dimension for num heads
+        # if mask is not None:
+        #     mask_seq_q = mask[..., :, None]
+        #     mask_seq_v = mask[..., None, :]
+        #     mask = mask_seq_q + mask_seq_v
+        #     mask = jnp.where(jnp.equal(mask, 0.0), mask, jnp.ones_like(mask))
+        #     mask = mask[..., None, :, :]  # add dimension for num heads
+
+        match len(mask_type.shape):
+            case 1:
+                # causal mask
+                batch_size, seq_len = q.shape[0], q.shape[-2]
+                mask = jnp.stack(
+                    [
+                        jnp.triu(
+                            jnp.ones((seq_len,seq_len)), k=1
+                        )
+                    ]\
+                        *batch_size
+                    )
+                mask = cs(mask[...,None,None,:,:], '[..., seq_len_q, seq_len_k]')
+
+            case 2:
+                # no mask
+                batch_size, seq_len = q.shape[0], q.shape[-2]
+                mask = cs(jnp.zeros((batch_size, 1, 1, seq_len, seq_len)), '[..., seq_len_q, seq_len_k]')
 
         scaled_attention = self.attention(q, k, v, mask=mask)
 
@@ -143,12 +162,12 @@ class BiDimensionalAttentionBlock(hk.Module):
     @check_shapes(
         "s: [batch_size, num_points, input_dim, hidden_dim]",
         "t: [batch_size, hidden_dim]",
-        "mask: [batch_size, num_points] if mask is not None",
+        "mask_type: [...]",
         "return[0]: [batch_size, num_points, input_dim, hidden_dim]",
         "return[1]: [batch_size, num_points, input_dim, hidden_dim]",
     )
     def __call__(
-        self, s: jnp.ndarray, t: jnp.ndarray, mask: jnp.ndarray
+        self, s: jnp.ndarray, t: jnp.ndarray, mask_type: jnp.ndarray
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Bi-dimensional attention block. Main computation block in the NDP noise model.
@@ -165,10 +184,10 @@ class BiDimensionalAttentionBlock(hk.Module):
 
         y_r = cs(jnp.swapaxes(y, 1, 2), "[batch_size, input_dim, num_points, hidden_dim]")
 
-        if mask is not None:
-            mask = jnp.expand_dims(mask, 1)
+        # if mask is not None:
+        #     mask = jnp.expand_dims(mask, 1)
 
-        y_att_n = MultiHeadAttention(2 * self.hidden_dim, self.num_heads)(y_r, y_r, y_r, mask)
+        y_att_n = MultiHeadAttention(2 * self.hidden_dim, self.num_heads)(y_r, y_r, y_r, mask_type)
         y_att_n = cs(y_att_n, "[batch_size, input_dim, num_points, hidden_dim_x2]")
         y_att_n = cs(
             jnp.swapaxes(y_att_n, 1, 2),
@@ -221,6 +240,7 @@ class BiDimensionalAttentionModel(hk.Module):
     hidden_dim: int
     num_heads: int
     init_zero: bool = True
+    keep_hidden: bool = False # whether to stay in hidden_dim (needed for multi-channel encoding)
 
     @check_shapes(
         "x: [batch_size, seq_len, input_dim]",
@@ -240,11 +260,12 @@ class BiDimensionalAttentionModel(hk.Module):
         "x: [batch_size, num_points, input_dim]",
         "y: [batch_size, num_points, output_dim]",
         "t: [batch_size]",
-        "mask: [batch_size, num_points] if mask is not None",
-        "return: [batch_size, num_points, 1]",
+        "mask_type: [...]",
+        "return: [batch_size, num_points, 1] if not self.keep_hidden",
+        "return: [batch_size, num_points, hidden_dim] if self.keep_hidden",
     )
     def __call__(
-        self, x: jnp.ndarray, y: jnp.ndarray, t: jnp.ndarray, mask: jnp.ndarray
+        self, x: jnp.ndarray, y: jnp.ndarray, t: jnp.ndarray, mask_type: jnp.ndarray
     ) -> jnp.ndarray:
         """
         Computes the additive noise that was added to `y_0` to obtain `y_t`
@@ -263,7 +284,7 @@ class BiDimensionalAttentionModel(hk.Module):
         skip = None
         for _ in range(self.n_layers):
             layer = BiDimensionalAttentionBlock(self.hidden_dim, self.num_heads)
-            x, skip_connection = layer(x, t_embedding, mask)
+            x, skip_connection = layer(x, t_embedding, mask_type)
             skip = skip_connection if skip is None else skip_connection + skip
 
         x = cs(x, "[batch_size, num_points, input_dim, hidden_dim]")
@@ -272,12 +293,12 @@ class BiDimensionalAttentionModel(hk.Module):
         skip = cs(reduce(skip, "b n d h -> b n h", "mean"), "[batch, num_points, hidden_dim]")
 
         eps = skip / math.sqrt(self.n_layers * 1.0)
-        eps = jax.nn.gelu(hk.Linear(self.hidden_dim)(eps))
+        eps_hidden = jax.nn.gelu(hk.Linear(self.hidden_dim)(eps))
         if self.init_zero:
-            eps = hk.Linear(1, w_init=jnp.zeros)(eps)
+            eps = hk.Linear(1, w_init=jnp.zeros)(eps_hidden)
         else:
-            eps = hk.Linear(1)(eps)
-        return eps
+            eps = hk.Linear(1)(eps_hidden)
+        return eps_hidden if self.init_zero else eps
 
 
 @dataclass
