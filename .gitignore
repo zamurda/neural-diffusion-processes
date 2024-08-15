@@ -16,3 +16,7 @@ venv/
 
 # testing files
 test.py
+
+# stored training data
+data/
+*.npy
