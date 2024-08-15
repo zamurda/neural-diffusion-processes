@@ -1,0 +1,22 @@
+# ignore pycache
+__pycache__/
+
+# ignore macos ds_store
+/DS_Store
+
+# Python virtual environments
+venv/
+.env/
+*.env
+
+# Compiled Python files
+*.pyc
+*.pyo
+*.pyd
+
+# testing files
+test.py
+
+# stored training data
+data/
+*.npy

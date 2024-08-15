@@ -1,0 +1,28 @@
+[dataset]
+data = 'se'
+features = []
+target_index = ''
+sample_length = 100
+
+[training]
+batch_size = 32
+num_epochs = 150
+
+[optimizer]
+loss_type = 'l1'
+num_warmup_epochs = 20
+num_decay_epochs = 200
+init_lr = 2e-5
+peak_lr =  1e-3
+end_lr = 1e-5
+ema_rate = 0.995
+
+[diffusion]
+schedule = "cosine"
+beta_start = 3e-4
+beta_end = 0.5
+timesteps = 500
+
+[restore]
+checkpoint_dir = "../gp_regression/trained_models/gp_Aug01_tyjj_testrun"
+from_index = -1

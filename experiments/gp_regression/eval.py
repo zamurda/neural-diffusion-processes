@@ -100,7 +100,10 @@ state = init(batch_init, jax.random.PRNGKey(53))
 loaded_state = load_checkpoint(state, checkpoint, step_index)
 net_with_params = partial(net, loaded_state.params_ema)
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> experiment/wind-data
 def sample_prior(key: Rng, x_target, model_fn):
     y0 = process.sample(key, x_target, mask=MASK_TYPE_NOMASK, model_fn=model_fn)
     return y0
@@ -148,7 +151,10 @@ for i,n in enumerate(ncond):
     print(f'processed cond samples {i}')
 plt.show()
     
+<<<<<<< HEAD
 
+=======
+>>>>>>> experiment/wind-data
 # run = aim.Run('bf1ab5c00490426183db0b77')
 # for i, (fig1, fig2) in enumerate(zip(prior_plots, cond_plots_random_ctx)):
 #     fig_map = {

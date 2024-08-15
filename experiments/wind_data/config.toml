@@ -1,0 +1,15 @@
+[dataset]
+data = 'wind_1wk_turbine1_eval_is.pkl'
+features = ['Posix.time.sec']
+target_index = 'Power.me'
+sample_length = 100
+
+[training]
+batch_size = 32
+num_epochs = 100
+
+[diffusion]
+schedule = "cosine"
+beta_start = 3e-4
+beta_end = 0.5
+timesteps = 500

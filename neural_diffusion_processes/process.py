@@ -1,15 +1,17 @@
 from typing import Protocol, Tuple
+from functools import partial
 
 import jax
 import jax.numpy as jnp
 from check_shapes import check_shapes
+from einops import rearrange
 
 from .types import Batch, Rng, ndarray
 
 
 class EpsModel(Protocol):
-    @check_shapes("t: []", "yt: [N, y_dim]", "x: [N, x_dim]", "mask: [N,]", "return: [N, y_dim]")
-    def __call__(self, t: ndarray, yt: ndarray, x: ndarray, mask: ndarray, *, key: Rng) -> ndarray:
+    @check_shapes("t: []", "yt: [N, y_dim]", "x: [N, x_dim]", "mask_type: [...]", "return: [N, y_dim]")
+    def __call__(self, t: ndarray, yt: ndarray, x: ndarray, mask_type: ndarray, *, key: Rng) -> ndarray:
         ...
 
 
@@ -38,14 +40,14 @@ class GaussianDiffusion:
         self.alphas = 1.0 - betas
         self.alpha_bars = jnp.cumprod(1.0 - betas)
 
-    @check_shapes("y0: [N, y_dim]", "t: []", "return[0]: [N, y_dim]", "return[1]: [N, y_dim]")
+    @check_shapes("y0: [N, y_dim...]", "t: []", "return[0]: [N, y_dim...]", "return[1]: [N, y_dim...]")
     def pt0(self, y0: ndarray, t: ndarray) -> Tuple[ndarray, ndarray]:
         alpha_bars = expand_to(self.alpha_bars[t], y0)
         m_t0 = jnp.sqrt(alpha_bars) * y0
         v_t0 = (1.0 - alpha_bars) * jnp.ones_like(y0)
         return m_t0, v_t0
 
-    @check_shapes("y0: [N, y_dim]", "t: []", "return[0]: [N, y_dim]", "return[1]: [N, y_dim]")
+    @check_shapes("y0: [N, y_dim...]", "t: []", "return[0]: [N, y_dim...]", "return[1]: [N, y_dim...]")
     def forward(self, key: Rng, y0: ndarray, t: ndarray) -> Tuple[ndarray, ndarray]:
         m_t0, v_t0 = self.pt0(y0, t)
         noise = jax.random.normal(key, y0.shape)
@@ -167,6 +169,7 @@ def loss(
     network: EpsModel,
     batch: Batch,
     key: Rng,
+    mask_type: ndarray = jnp.array([[]]),
     *,
     num_timesteps: int,
     loss_type: str = "l1",
@@ -185,14 +188,15 @@ def loss(
         raise ValueError(f"Unknown loss type {loss_type}")
 
     @check_shapes(
-        "t: []", "y: [N, y_dim]", "x: [N, x_dim]", "mask: [N,] if mask is not None", "return: []"
+        "t: [N]", "y: [N, y_dim]", "x: [N, x_dim]", "mask_type: [...]", "return: []"
     )
-    def loss_fn(key, t, y, x, mask):
+    def loss_fn(key, t, y, x, mask_type):
         yt, noise = process.forward(key, y, t)
-        noise_hat = network(t, yt, x, mask, key=key)
+        noise_hat = network(t, yt, x, mask_type, key=key)
         loss_value = jnp.sum(loss_metric(noise, noise_hat), axis=1)  # [N,]
-        loss_value = loss_value * (1.0 - mask)
-        num_points = len(mask) - jnp.count_nonzero(mask)
+        # loss_value = loss_value * (1.0 - mask)
+        # num_points = len(mask) - jnp.count_nonzero(mask)
+        num_points = y.shape[0]
         return jnp.sum(loss_value) / num_points
 
     batch_size = len(batch.x_target)
@@ -205,11 +209,73 @@ def loss(
 
     keys = jax.random.split(key, batch_size)
 
-    if batch.mask_target is None:
-        # consider all points
-        mask_target = jnp.zeros_like(batch.x_target[..., 0])
-    else:
-        mask_target = batch.mask_target
+    # if batch.mask_target is None:
+    #     # consider all points
+    #     mask_target = jnp.zeros_like(batch.x_target[..., 0])
+    # else:
+    #     mask_target = batch.mask_target
+    loss_with_mask = partial(loss_fn, mask_type=mask_type)
 
-    losses = jax.vmap(loss_fn)(keys, t, batch.y_target, batch.x_target, mask_target)
+    losses = jax.vmap(loss_with_mask)(keys, t, batch.y_target, batch.x_target)
+    return jnp.mean(losses)
+
+
+def loss_multichannel(
+    process: GaussianDiffusion,
+    network: EpsModel,
+    batch: Batch,
+    key: Rng,
+    *,
+    mask_type: ndarray = jnp.array([[]]),
+    n_channels: int,
+    num_timesteps: int,
+    loss_type: str = "l1",        
+) -> jnp.ndarray:
+    """ 
+    loss for a multi-channel model. basically the same loss but t is the same within a channel
+    """
+    if loss_type == "l1":
+
+        def loss_metric(a, b):
+            return jnp.abs(a - b)
+
+    elif loss_type == "l2":
+
+        def loss_metric(a, b):
+            return (a - b) ** 2
+
+    else:
+        raise ValueError(f"Unknown loss type {loss_type}")
+
+    @check_shapes(
+        "t: []", "y: [N, y_dim...]", "x: [N, x_dim...]", "mask_type: [...]", "return: []"
+    )
+    def loss_fn(key, t, y, x, mask_type):
+        yt, noise = process.forward(key, y, t)
+        t = t.repeat(y.shape[0])
+        noise_hat = network(t, yt, x, mask_type, key=key)
+        loss_value = jnp.sum(loss_metric(noise, noise_hat), axis=1)  # [N,]
+        # loss_value = loss_value * (1.0 - mask)
+        # num_points = len(mask) - jnp.count_nonzero(mask)
+        num_points = y.shape[0]
+        return jnp.sum(loss_value) / num_points
+
+    batch_size = len(batch.x_target) // n_channels # (actual size of batch dimension)
+
+    key, tkey = jax.random.split(key)
+    # Low-discrepancy sampling over t to reduce variance
+    t = jax.random.uniform(tkey, (batch_size,), minval=0, maxval=num_timesteps / batch_size)
+    t = t + (num_timesteps / batch_size) * jnp.arange(batch_size)
+    t = t.astype(jnp.int32)
+
+    keys = jax.random.split(key, batch_size)
+
+    # rearrange so that one MOGP sample is processed at a time
+    rearrange_arg = '(batch channel) seq_len ... -> batch channel seq_len ...'
+    y = rearrange(batch.y_target, rearrange_arg, channel=n_channels)
+    x = rearrange(batch.x_target, rearrange_arg, channel=n_channels)
+    # t = rearrange(t, '(batch channel) -> batch channel', channel=n_channels) # then t will be scalar
+    
+    loss_with_mask = partial(loss_fn, mask_type=mask_type)
+    losses = jax.vmap(loss_with_mask)(keys, t, y, x)
     return jnp.mean(losses)
