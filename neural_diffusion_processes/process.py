@@ -188,7 +188,7 @@ def loss(
         raise ValueError(f"Unknown loss type {loss_type}")
 
     @check_shapes(
-        "t: [N]", "y: [N, y_dim]", "x: [N, x_dim]", "mask_type: [...]", "return: []"
+        "t: []", "y: [N, y_dim]", "x: [N, x_dim]", "mask_type: [...]", "return: []"
     )
     def loss_fn(key, t, y, x, mask_type):
         yt, noise = process.forward(key, y, t)
@@ -251,10 +251,11 @@ def loss_multichannel(
         "t: []", "y: [N, y_dim...]", "x: [N, x_dim...]", "mask_type: [...]", "return: []"
     )
     def loss_fn(key, t, y, x, mask_type):
+        """in the multichannel case, the loss is first averaged over the channel dimensions"""
         yt, noise = process.forward(key, y, t)
         t = t.repeat(y.shape[0])
         noise_hat = network(t, yt, x, mask_type, key=key)
-        loss_value = jnp.sum(loss_metric(noise, noise_hat), axis=1)  # [N,]
+        loss_value = jnp.mean(loss_metric(noise, noise_hat), axis=0).squeeze(-1)  # [N,]
         # loss_value = loss_value * (1.0 - mask)
         # num_points = len(mask) - jnp.count_nonzero(mask)
         num_points = y.shape[0]
