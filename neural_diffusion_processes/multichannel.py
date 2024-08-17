@@ -223,7 +223,7 @@ class ChannelEncodingBlock(hk.Module):
 
         positional_encoding = timestep_embedding(jnp.arange(n_channels), embedding_dim=s.shape[-1], max_positions=1_000) # generates positional encodings which need to be broadcasted across the channel dim
         positional_encoding = cs(
-            positional_encoding.repeat(s.shape[0], axis=0)[...,None,:],
+         jnp.tile(positional_encoding, (s.shape[0], 1))[...,None,:],
             '[batch_size_x_channel, 1, hidden_dim]'
         )
         s += rearrange(positional_encoding, '(batch_size channel) 1 hidden_dim -> batch_size channel 1 hidden_dim', channel=n_channels)
