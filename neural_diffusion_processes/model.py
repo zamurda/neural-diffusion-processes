@@ -298,7 +298,7 @@ class BiDimensionalAttentionModel(hk.Module):
             eps = hk.Linear(1, w_init=jnp.zeros)(eps_hidden)
         else:
             eps = hk.Linear(1)(eps_hidden)
-        return eps_hidden if self.init_zero else eps
+        return eps_hidden if self.keep_hidden else eps
 
 
 @dataclass
