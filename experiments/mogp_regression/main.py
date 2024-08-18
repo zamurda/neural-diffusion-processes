@@ -1,5 +1,6 @@
 from typing import Mapping, Tuple, List, Union
 from jaxtyping import Array, PyTree
+import pickle
 import re
 import os
 import sys
@@ -37,11 +38,17 @@ from neural_diffusion_processes.process import cosine_schedule, GaussianDiffusio
 
 from absl import flags # for training on apple gpu
 flags.DEFINE_bool('metal', False, "whether gpu training should occur")
+flags.DEFINE_bool('nvidia', False, "whether jax should look for NVIDIA gpus")
 
 from util.config_tools import get_config_map, parse_config_map, dict_to_yaml, Config, DatasetConfig
 from util.load_model import init_state_from_pickle
 
 jax.config.update('jax_disable_jit', False) # set true for debugging
+FLAGS = flags.FLAGS
+flags.FLAGS(sys.argv)
+if flags.FLAGS.metal or flags.FLAGS.nvidia:
+    os.environ['JAX_PLATFORMS'] = 'gpu'
+else: os.environ['JAX_PLATFORMS'] = 'cpu'
 
 MASK_TYPE_CAUSAL = jnp.array([])
 MASK_TYPE_NOMASK = jnp.array([[]])
@@ -59,20 +66,23 @@ timestamp = datetime.datetime.now().strftime("%b%d")
 letters = string.ascii_lowercase
 id = ''.join(random.choice(letters) for i in range(4))
 EXPERIMENTS_DIR = './trained_models'
-EXPERIMENT = f'mogp_{timestamp}_{id}_{PRETRAINED_MODEL_NAME}'
+EXPERIMENT = f'mogp_{timestamp}_{id}'
 
 SAVE_HERE = pathlib.Path(EXPERIMENTS_DIR)/pathlib.Path(EXPERIMENT)
 if not SAVE_HERE.exists():
-    os.mkdir(SAVE_HERE)
+    os.makedirs(SAVE_HERE, exist_ok=True)
+
+class Params(eqx.Module):
+    params: PyTree
+    params_ema: PyTree
+    step: int
 
 # generate MOGP data
 kernels = {'se': partial(se_kernel, sigma2=1, l=0.35)}
-coreg_weights = jnp.array([
-    [0.5, 0.5],
-    [0.2, 0.8],
-    [0.6, 0.4],
-    [0.1, 0.9]
-])
+num_channels = 4
+num_latents = 2
+weightskey, datasetkey = jax.random.split(key)
+coreg_weights = jax.random.normal(weightskey, (num_channels, num_latents))
 ds_train = gen_dataset(
     config.seed,
     kernels[config.dataset.data],
@@ -163,7 +173,7 @@ def ema_update(decay, ema_params, new_params):
     trbl_ema, fix_ema = partition(predicate, ema_params)
     def _ema(ema_params, new_params):
         return decay * ema_params + (1.0 - decay) * new_params
-    return merge(jax.tree_map(_ema, trbl_ema, trbl_params), fix_ema) #changed from tree.map since jax has been downgraded
+    return merge(jax.tree.map(_ema, trbl_ema, trbl_params), fix_ema) #jax upgraded
 
 
 # update which only does wrt trainable params:
@@ -219,7 +229,7 @@ def process_plots(batch, state) -> None:
     return fig
 
 # load pretrained checkpoint
-pretrained_state: TrainingState = init_state_from_pickle(PRETRAINED_MODEL_DIR)
+pretrained_state: TrainingState = init_state_from_pickle(os.path.abspath(PRETRAINED_MODEL_DIR))
 
 def traverse_and_switch(*, to_place, place_in):
     for m, n, v in traverse(place_in):
@@ -255,11 +265,10 @@ batch_init = Batch(
     y_target=jnp.zeros((32, config.dataset.sample_length, 1)),
 )
 state: TrainingState = init(batch_init, jax.random.PRNGKey(config.seed))
-
 writer = AimWriter(EXPERIMENT)
 cfg_dict = asdict(config)
 cfg_dict['mask_type'] = 'no mask'
-cfg_dict['coreg_weights'] = coreg_weights
+cfg_dict['coreg_weights'] = coreg_weights.tolist()
 writer.log_hparams(cfg_dict)
 
 
@@ -269,7 +278,7 @@ actions = [
         callback_fn=lambda step, t, **kwargs: writer.write_scalars(step, kwargs["metrics"])
     ),
     actions.PeriodicCallback(
-        every_steps=steps_per_epoch,
+        every_steps=1,
         callback_fn=lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], SAVE_HERE, step)
     ),
     actions.PeriodicCallback(
@@ -297,9 +306,10 @@ def check_if_fixed(predicate, params_old, params_new) -> bool:
     new_fixed, __ = partition(predicate, params_new)
     return eqx.tree_equal(old_fixed, new_fixed)
 
+
 with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
-    writer = csv.writer(csvfile, delimiter=',')
-    writer.writerow(['step', 'loss', 'learning_rate'])
+    csvwriter = csv.writer(csvfile, delimiter=',')
+    csvwriter.writerow(['step', 'loss', 'learning_rate'])
 
     for step, batch in zip(progress_bar, ds_train):
         if step < state.step: continue  # wait for the state to catch up in case of restarts
@@ -307,10 +317,12 @@ with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
         metrics["lr"] = learning_rate_schedule(state.step)
 
         for action in actions:
-            action(step, t=None, metrics=metrics, state=state, key=key, batch=batch, writer=writer)
+            action(step, t=None, metrics=metrics, state=Params(state.params, state.params_ema, step), key=key, batch=batch, writer=csvwriter)
 
         if step % 100 == 0:
             progress_bar.set_description(f"loss {metrics['loss']:.2f}")
 
 print(f'============================ {EXPERIMENT} finished training ===============================')
 dict_to_yaml(cfg_dict, SAVE_HERE/'config.yaml')
+with open(SAVE_HERE/'latest_trainingstate.pkl', 'wb') as file:
+    pickle.dump(Params(state.params, state.params_ema, state.step), file)
