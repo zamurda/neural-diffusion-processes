@@ -53,6 +53,8 @@ def make_batch(key, batch_size, kernelfunc, coreg_weights, maxval, minval, sampl
         lambda key, x_b: sample_heterotopic_mogp(jax.random.split(key, C), kernelfunc, x_b, coreg_weights),
         in_axes=(0,0)
     )(keys, X)
+    key, subkey = jax.random.split(subkey)
+    samples += jax.random.normal(key, (samples.shape)) * 1e-3 # add observation noise
 
     rearrange_arg_x = "b c n d -> (b c) n d"
     rearrange_arg_y = "b c n -> (b c) n"
@@ -61,7 +63,7 @@ def make_batch(key, batch_size, kernelfunc, coreg_weights, maxval, minval, sampl
         y_target=rearrange(samples, rearrange_arg_y)[...,None]
     )
 
-def gen_dataset(seed, kernelfunc, coreg_weights, x_minval, x_maxval, num_epochs, sample_length) -> Dataset:
+def gen_dataset(seed, kernelfunc, coreg_weights, x_minval, x_maxval, num_epochs, batch_size, sample_length) -> Dataset:
     """
     Returns generator over entire dataset
     """
@@ -78,7 +80,6 @@ def gen_dataset(seed, kernelfunc, coreg_weights, x_minval, x_maxval, num_epochs,
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import gpflow
-    import tensorflow as tf
     from jax import dlpack
     import numpy as np
     import sys
