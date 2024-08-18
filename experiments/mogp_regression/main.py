@@ -80,6 +80,7 @@ ds_train = gen_dataset(
     -1,
     1,
     config.training.num_epochs,
+    config.training.batch_size,
     config.dataset.sample_length
 )
 
@@ -256,25 +257,25 @@ batch_init = Batch(
 )
 state: TrainingState = init(batch_init, jax.random.PRNGKey(config.seed))
 
-writer = AimWriter(EXPERIMENT)
+aimwriter = AimWriter(EXPERIMENT)
 cfg_dict = asdict(config)
 cfg_dict['mask_type'] = 'no mask'
-cfg_dict['coreg_weights'] = coreg_weights
-writer.log_hparams(cfg_dict)
+cfg_dict['coreg_weights'] = coreg_weights.tolist()
+aimwriter.log_hparams(cfg_dict)
 
 
 actions = [
     actions.PeriodicCallback(
         every_steps=1,
-        callback_fn=lambda step, t, **kwargs: writer.write_scalars(step, kwargs["metrics"])
+        callback_fn=lambda step, t, **kwargs: aimwriter.write_scalars(step, kwargs["metrics"])
     ),
     actions.PeriodicCallback(
-        every_steps=steps_per_epoch,
+        every_steps=1,
         callback_fn=lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], SAVE_HERE, step)
     ),
     actions.PeriodicCallback(
         every_steps=2*steps_per_epoch,
-        callback_fn=lambda step, t, **kwargs: writer.write_figures(
+        callback_fn=lambda step, t, **kwargs: aimwriter.write_figures(
             step,
             {
                 'prior samples':prior_plots(batch=kwargs['batch'], state=kwargs['state']),
@@ -298,16 +299,17 @@ def check_if_fixed(predicate, params_old, params_new) -> bool:
     return eqx.tree_equal(old_fixed, new_fixed)
 
 with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
-    writer = csv.writer(csvfile, delimiter=',')
-    writer.writerow(['step', 'loss', 'learning_rate'])
+    csvwriter = csv.writer(csvfile, delimiter=',')
+    csvwriter.writerow(['step', 'loss', 'learning_rate'])
 
     for step, batch in zip(progress_bar, ds_train):
+        if step >= 5: break
         if step < state.step: continue  # wait for the state to catch up in case of restarts
         state, metrics = update_step(state, batch)
         metrics["lr"] = learning_rate_schedule(state.step)
 
         for action in actions:
-            action(step, t=None, metrics=metrics, state=state, key=key, batch=batch, writer=writer)
+            action(step, t=None, metrics=metrics, state=state, key=key, batch=batch, writer=csvwriter)
 
         if step % 100 == 0:
             progress_bar.set_description(f"loss {metrics['loss']:.2f}")
