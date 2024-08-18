@@ -53,6 +53,14 @@ class GaussianDiffusion:
         noise = jax.random.normal(key, y0.shape)
         yt = m_t0 + jnp.sqrt(v_t0) * noise
         return yt, noise
+    
+    @check_shapes("y0: [N, y_dim...]", "t: []", "return[0]: [N, y_dim...]", "return[1]: [N, y_dim...]")
+    def fwd_with_same_noise(self, key: Rng, y0: ndarray, t: ndarray) -> Tuple[ndarray, ndarray]:
+        m_t0, v_t0 = self.pt0(y0, t)
+        noise = jax.random.normal(key, (y0.shape[1])) # sample noise of size seq_len so that the same noise vector can be applied over all input samples
+        fullnoise=  jnp.tile(noise, (y0.shape[0], 1))[...,None]
+        yt = m_t0 + jnp.sqrt(v_t0) * fullnoise
+        return yt, fullnoise
 
     def ddpm_backward_step(self, key: Rng, noise: ndarray, yt: ndarray, t: ndarray) -> ndarray:
         beta_t = expand_to(self.betas[t], yt)
@@ -251,8 +259,11 @@ def loss_multichannel(
         "t: []", "y: [N, y_dim...]", "x: [N, x_dim...]", "mask_type: [...]", "return: []"
     )
     def loss_fn(key, t, y, x, mask_type):
-        """in the multichannel case, the loss is first averaged over the channel dimensions"""
-        yt, noise = process.forward(key, y, t)
+        """
+        in the multichannel case, the loss is first averaged over the channel dimensions
+        each output in a channel is forwarded with the same noise (so that latent alignment can take place)
+        """
+        yt, noise = process.fwd_with_same_noise(key, y, t)
         t = t.repeat(y.shape[0])
         noise_hat = network(t, yt, x, mask_type, key=key)
         loss_value = jnp.mean(loss_metric(noise, noise_hat), axis=0).squeeze(-1)  # [N,]
