@@ -226,13 +226,12 @@ class ChannelEncodingBlock(hk.Module):
          jnp.tile(positional_encoding, (s.shape[0], 1))[...,None,:],
             '[batch_size_x_channel, 1, hidden_dim]'
         )
-        s += rearrange(positional_encoding, '(batch_size channel) 1 hidden_dim -> batch_size channel 1 hidden_dim', channel=n_channels)
+        s_i += rearrange(positional_encoding, '(batch_size channel) 1 hidden_dim -> batch_size channel 1 hidden_dim', channel=n_channels)
         
-        s_i_1 = cs(hk.Conv2D(n_channels, kernelshape, padding='SAME', data_format='NCHW')(s), '[batch_size, channel, seq_len, hidden_dim]')
+        s_i = cs(hk.Conv2D(n_channels, kernelshape, padding='SAME', data_format='NCHW')(s_i), '[batch_size, channel, seq_len, hidden_dim]')
 
-        alpha_1 = hk.get_parameter('alpha_1', shape=[], init=jnp.zeros)
-        conv_result = alpha_1 * s_i + (1-alpha_1) * s_i_1 if not self.ignore_alpha else s_i
-        conv_result = jax.nn.gelu(conv_result)
+        alpha_1 = hk.get_parameter('alpha_1', shape=[], init=jnp.ones)
+        conv_result = alpha_1 * s + (1-alpha_1) * jax.nn.gelu(s_i) if not self.ignore_alpha else s # skip conv block if alpha = 1
 
         # now multihead attn in channel direction
         s_i = jnp.copy(conv_result)
@@ -250,7 +249,7 @@ class ChannelEncodingBlock(hk.Module):
             jax.nn.gelu(s_i_1),
             'batch_size seq_len channel hidden_dim -> batch_size channel seq_len hidden_dim'
         )                 
-        alpha_2 = hk.get_parameter('alpha_2', shape=[], init=jnp.zeros)
+        alpha_2 = hk.get_parameter('alpha_2', shape=[], init=jnp.ones)
         return alpha_2 * s_i + (1-alpha_2) * s_i_1 if not self.ignore_alpha else s_i
 
 
@@ -294,7 +293,7 @@ class MultiChannelEncodingModel(hk.Module):
             noise = rearrange(noise, '(batch_size channel) seq_len hidden_dim -> batch_size channel seq_len hidden_dim', channel=self.n_channels)
             noise = ChannelEncodingBlock(n_layers=self.n_layers, num_heads=self.num_heads, kernel_length=self.kernel_length, ignore_alpha=self.ignore_alpha)(noise)
             noise = rearrange(noise, 'batch_size channel seq_len hidden_dim -> (batch_size channel) seq_len hidden_dim', channel=self.n_channels)
-            noise = noise if skip is None else noise + skip
+            noise = hk.LayerNorm(-1, False, False)(noise) if skip is None else hk.LayerNorm(-1, False, False,)(noise)  + skip
             
             skip = jnp.copy(noise)
 
