@@ -68,7 +68,7 @@ def gen_dataset(seed, kernelfunc, coreg_weights, x_minval, x_maxval, num_epochs,
     Returns generator over entire dataset
     """
     init_rng = jax.random.key(seed)
-    mogp_samples_per_batch = 32 // coreg_weights.shape[0]
+    mogp_samples_per_batch = batch_size
     batches_per_epoch = _MOGP_SAMPLES_PER_EPOCH // mogp_samples_per_batch
     num_steps = num_epochs * batches_per_epoch
     keys = jax.random.split(init_rng, num_steps)
