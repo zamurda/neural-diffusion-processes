@@ -141,6 +141,10 @@ class MultiHeadAttention(hk.Module):
                 batch_size, seq_len = q.shape[0], q.shape[-2]
                 mask = cs(jnp.zeros((batch_size, 1, 1, seq_len, seq_len)), '[..., seq_len_q, seq_len_k]')
 
+            case _:
+                # custom - be nice :(
+                mask = cs(mask_type, "[..., seq_len_q, seq_len_k]")
+
         scaled_attention = self.attention(q, k, v, mask=mask)
 
         scaled_attention = rearrange(

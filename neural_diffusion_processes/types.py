@@ -11,7 +11,7 @@ from simple_pytree import Pytree
 
 ndarray = Union[jnp.ndarray, np.ndarray]
 Dtype = Any
-Rng = jax.random.KeyArray
+Rng = jax.Array
 Params = optax.Params
 Config = Any
 
