@@ -253,8 +253,13 @@ def init(batch: Batch, key: Rng) -> TrainingState:
 # init state
 INPUT_DIM = 1
 batch_init = Batch(
+<<<<<<< Updated upstream
     x_target=jnp.zeros((config.training.batch_size * num_channels, config.dataset.sample_length, INPUT_DIM)),
     y_target=jnp.zeros((config.training.batch_size * num_channels, config.dataset.sample_length, 1)),
+=======
+    x_target=jnp.zeros((num_channels * config.training.batch_size, config.dataset.sample_length, INPUT_DIM)),
+    y_target=jnp.zeros((num_channels * config.training.batch_size, config.dataset.sample_length, 1)),
+>>>>>>> Stashed changes
 )
 state: TrainingState = init(batch_init, jax.random.PRNGKey(config.seed))
 
@@ -267,15 +272,15 @@ aimwriter.log_hparams(cfg_dict)
 
 actions = [
     actions.PeriodicCallback(
-        every_steps=1,
+        every_steps=1*steps_per_epoch,
         callback_fn=lambda step, t, **kwargs: aimwriter.write_scalars(step, kwargs["metrics"])
     ),
     actions.PeriodicCallback(
-        every_steps=1,
+        every_steps=10*steps_per_epoch,
         callback_fn=lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], SAVE_HERE, step)
     ),
     actions.PeriodicCallback(
-        every_steps=2*steps_per_epoch,
+        every_steps=NUM_STEPS,
         callback_fn=lambda step, t, **kwargs: aimwriter.write_figures(
             step,
             {
@@ -299,7 +304,6 @@ with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
     csvwriter.writerow(['step', 'loss', 'learning_rate'])
 
     for step, batch in zip(progress_bar, ds_train):
-        if step >= 5: break
         if step < state.step: continue  # wait for the state to catch up in case of restarts
         state, metrics = update_step(state, batch)
         metrics["lr"] = learning_rate_schedule(state.step)
