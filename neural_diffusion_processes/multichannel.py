@@ -167,7 +167,7 @@ class MultiChannelEncodingModel(hk.Module):
     
 
 @dataclass
-class MultiChannelBDAM:
+class MultiChannelBDAM(hk.Module):
     n_layers: int #number of bdam and multi channel blocks
     n_channels: int #number of channels
     hidden_dim: int

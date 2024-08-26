@@ -33,7 +33,7 @@ from ml_tools import actions
 
 import neural_diffusion_processes as ndp
 from neural_diffusion_processes.types import Dataset, Batch , Rng
-from neural_diffusion_processes.multichannel import MultiChannelEncodingModel
+from neural_diffusion_processes.multichannel import MultiChannelBDAM
 from neural_diffusion_processes.process import cosine_schedule, GaussianDiffusion
 
 from absl import flags # for training on apple gpu
@@ -95,7 +95,7 @@ ds_train = gen_dataset(
 )
 
 # init optimizer
-NUM_STEPS =  (_MOGP_SAMPLES_PER_EPOCH // (32 // coreg_weights.shape[0])) * config.training.num_epochs
+NUM_STEPS =  (_MOGP_SAMPLES_PER_EPOCH // config.training.batch_size) * config.training.num_epochs
 steps_per_epoch = NUM_STEPS // config.training.num_epochs
 learning_rate_schedule = optax.warmup_cosine_decay_schedule(
     init_value=config.optimizer.init_lr,
@@ -105,9 +105,9 @@ learning_rate_schedule = optax.warmup_cosine_decay_schedule(
     end_value=config.optimizer.end_lr,
 )
 
-# purpose of label function is to assign 'update' or 'fix' to parameter names for the multi_transform to the updates
+# purpose of label function is to assign 0 or 1 to parameter names for the multi_transform to the updates
 def label_fn(ptree):
-    labeller = lambda path, _: 'fix' if bool(re.search(r'(?:\w+/)*\bbi_dimensional_attention_model\b(?:\/\w+)*', '/'.join(str(p) for p in path))) else 'update'
+    labeller = lambda path, _: 0 if bool(re.search(r'(?:\w+/)*\bbi_dimensional_attention_block[_\d+]*\b(?:\/\w+)*', '/'.join(str(p) for p in path))) or bool(re.search('multi_channel_bdam/linear[_\d+]*', '/'.join(str(p) for p in path))) else 1
     return jax.tree_util.tree_map_with_path(labeller, ptree)
 
 update_chain = optax.chain(
@@ -117,44 +117,27 @@ update_chain = optax.chain(
     optax.scale(-1.0),
 )
 optimizer = optax.multi_transform(
-    {"update": update_chain, "fix": optax.set_to_zero()}, param_labels=label_fn
+    {1: update_chain, 0: optax.set_to_zero()}, param_labels=label_fn
 )
 
-# define network functions
 @hk.without_apply_rng
 @hk.transform
 def network(t, y, x, mask_type):
-    model = MultiChannelEncodingModel(
-        n_layers=config.network.n_layers,
-        hidden_dim=config.network.hidden_dim,
-        num_heads=config.network.num_heads,
-        n_blocks=4,
-        n_channels=coreg_weights.shape[0]
+    model = MultiChannelBDAM(
+        n_layers=4,
+        hidden_dim=64,
+        num_heads=8,
+        n_channels=4
     )
     return model(x, y, t, mask_type)
-    # return partial(model, mask_type=mask_type)(x, y, t)
-
 
 @jax.jit
 def net(params, t, yt, x, mask_type, *, key):
     del key  # the network is deterministic
-    #NOTE: Network awkwardly requires a batch dimension for the inputs
-    out = network.apply(params, t, yt, x, mask_type)[0]
-    W, b = params['multi_channel_encoding_model/bi_dimensional_attention_model/linear_2']['w'], params['multi_channel_encoding_model/bi_dimensional_attention_model/linear_2']['b']
-    return jnp.einsum('...nh,h1 -> ...n1', out, W) + b
+    #NOTE: No batch dimension for network inputs 
+    out = network.apply(params, t, yt, x, mask_type)
+    return out
 
-
-# loss function with trainable and fixed weights:
-def loss_fn(params_trainable, params_fixed, batch, key) -> jnp.ndarray:
-    params = merge(params_trainable, params_fixed)
-    net_with_params = partial(net, params)
-    kwargs = dict(
-        num_timesteps=config.diffusion.timesteps,
-        loss_type=config.optimizer.loss_type,
-        mask_type=MASK_TYPE_NOMASK,
-        n_channels=coreg_weights.shape[0]
-        )
-    return ndp.process.loss_multichannel(process, net_with_params, batch, key, **kwargs)
 
 def loss_fn(params, batch, key) -> jnp.ndarray:
     net_with_params = partial(net, params)
@@ -167,14 +150,15 @@ def loss_fn(params, batch, key) -> jnp.ndarray:
     return ndp.process.loss_multichannel(process, net_with_params, batch, key, **kwargs)
 
 
-@jax.jit
-def ema_update(decay, ema_params, new_params):
-    predicate = lambda m, n, v: bool(re.search(r'(?:\w+/)*\bbi_dimensional_attention_model\b(?:\/\w+)*', m))
-    trbl_params, fix_params = partition(predicate, new_params)
-    trbl_ema, fix_ema = partition(predicate, ema_params)
-    def _ema(ema_params, new_params):
-        return decay * ema_params + (1.0 - decay) * new_params
-    return merge(jax.tree.map(_ema, trbl_ema, trbl_params), fix_ema) #jax upgraded
+@jax.jit # fix or update
+def ema_update(decay, labels, ema_params, new_params):
+    def _ema(ema_params, new_params, label):
+        return jax.lax.cond(
+            label == 1,
+            lambda: decay * ema_params + (1.0 - decay) * new_params,
+            lambda: ema_params
+        )
+    return jax.tree.map(_ema, ema_params, new_params, labels) #jax upgraded
 
 
 # update which only does wrt trainable params:
@@ -186,7 +170,8 @@ def update_step(state: TrainingState, batch: Batch) -> Tuple[TrainingState, Mapp
     loss_value, grads = loss_and_grad_fn(state.params, batch, loss_key)
     updates, new_opt_state = optimizer.update(grads, state.opt_state)
     new_params = optax.apply_updates(state.params, updates)
-    new_params_ema = ema_update(config.optimizer.ema_rate, state.params_ema, new_params)
+    labels = label_fn(state.params)
+    new_params_ema = ema_update(config.optimizer.ema_rate, labels, state.params_ema, new_params)
     new_state = TrainingState(
         params=new_params,
         params_ema=new_params_ema,
@@ -234,13 +219,19 @@ pretrained_state: TrainingState = init_state_from_pickle(os.path.abspath(PRETRAI
 
 def traverse_and_switch(*, to_place, place_in):
     for m, n, v in traverse(place_in):
-        if bool(re.search(r'(?:\w+/)*\bbi_dimensional_attention_model\b(?:\/\w+)*', m)):
-            name = re.sub(r'^(?:\w+\/)*\bbi_dimensional_attention_model\b', 'bi_dimensional_attention_model', m)
+        pattern = (re.search(r'(?:\w+/)*\bbi_dimensional_attention_block[_\d+]*\b(?:\/\w+)*', m))
+        if bool(pattern): #if module name in new params contains bi_dimensional_attention_block
+            name = re.sub(r'^(?:\w+\/)*\bbi_dimensional_attention_block', 'bi_dimensional_attention_model/bi_dimensional_attention_block', m) #new params will be
             v = to_place[name][n]
         else:
             v = v
         # place back in
         place_in[m][n] = v
+    # manually switch the linear layers
+    # linear, linear_1, linear_2
+    place_in['multi_channel_bdam/linear'] = to_place['bi_dimensional_attention_model/linear']
+    place_in['multi_channel_bdam/linear_1'] = to_place['bi_dimensional_attention_model/linear_1']
+    place_in['multi_channel_bdam/linear_2'] = to_place['bi_dimensional_attention_model/linear_2']
 
 @jax.jit
 def init(batch: Batch, key: Rng) -> TrainingState:
@@ -262,8 +253,8 @@ def init(batch: Batch, key: Rng) -> TrainingState:
 # init state
 INPUT_DIM = 1
 batch_init = Batch(
-    x_target=jnp.zeros((32, config.dataset.sample_length, INPUT_DIM)),
-    y_target=jnp.zeros((32, config.dataset.sample_length, 1)),
+    x_target=jnp.zeros((config.training.batch_size * num_channels, config.dataset.sample_length, INPUT_DIM)),
+    y_target=jnp.zeros((config.training.batch_size * num_channels, config.dataset.sample_length, 1)),
 )
 state: TrainingState = init(batch_init, jax.random.PRNGKey(config.seed))
 
@@ -301,12 +292,6 @@ actions = [
 
 steps = range(state.step + 1, NUM_STEPS + 1)
 progress_bar = tqdm.tqdm(steps)
-
-def check_if_fixed(predicate, params_old, params_new) -> bool:
-    """just for testing if fixed params are actually fixed"""
-    old_fixed, _ = partition(predicate, params_old)
-    new_fixed, __ = partition(predicate, params_new)
-    return eqx.tree_equal(old_fixed, new_fixed)
 
 
 with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
