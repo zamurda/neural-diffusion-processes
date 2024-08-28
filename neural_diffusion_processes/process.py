@@ -269,7 +269,7 @@ def loss_multichannel(
         loss_value = jnp.mean(loss_metric(noise, noise_hat), axis=0).squeeze(-1)  # [N,]
         # loss_value = loss_value * (1.0 - mask)
         # num_points = len(mask) - jnp.count_nonzero(mask)
-        num_points = y.shape[0]
+        num_points = y.shape[1]
         return jnp.sum(loss_value) / num_points
 
     batch_size = len(batch.x_target) // n_channels # (actual size of batch dimension)
