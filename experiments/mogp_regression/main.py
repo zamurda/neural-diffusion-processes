@@ -107,7 +107,7 @@ learning_rate_schedule = optax.warmup_cosine_decay_schedule(
 
 # purpose of label function is to assign 0 or 1 to parameter names for the multi_transform to the updates
 def label_fn(ptree):
-    labeller = lambda path, _: 0 if bool(re.search(r'(?:\w+/)*\bbi_dimensional_attention_block[_\d+]*\b(?:\/\w+)*', '/'.join(str(p) for p in path))) or bool(re.search('multi_channel_bdam/linear[_\d+]*', '/'.join(str(p) for p in path))) else 1
+    labeller = lambda path, _: 0 if bool(re.search(r'(?:\w+/)*\bbi_dimensional_attention_block[_\d+]*\b(?:\/\w+)*', '/'.join(str(p) for p in path))) or bool(re.search('multi_channel_bdam/linear(?!_2)', '/'.join(str(p) for p in path))) else 1
     return jax.tree_util.tree_map_with_path(labeller, ptree)
 
 update_chain = optax.chain(
@@ -124,10 +124,10 @@ optimizer = optax.multi_transform(
 @hk.transform
 def network(t, y, x, mask_type):
     model = MultiChannelBDAM(
-        n_layers=4,
-        hidden_dim=64,
-        num_heads=8,
-        n_channels=4
+        n_layers=config.network.n_layers,
+        hidden_dim=config.network.hidden_dim,
+        num_heads=config.network.num_heads,
+        n_channels=num_channels
     )
     return model(x, y, t, mask_type)
 
@@ -253,13 +253,8 @@ def init(batch: Batch, key: Rng) -> TrainingState:
 # init state
 INPUT_DIM = 1
 batch_init = Batch(
-<<<<<<< Updated upstream
     x_target=jnp.zeros((config.training.batch_size * num_channels, config.dataset.sample_length, INPUT_DIM)),
     y_target=jnp.zeros((config.training.batch_size * num_channels, config.dataset.sample_length, 1)),
-=======
-    x_target=jnp.zeros((num_channels * config.training.batch_size, config.dataset.sample_length, INPUT_DIM)),
-    y_target=jnp.zeros((num_channels * config.training.batch_size, config.dataset.sample_length, 1)),
->>>>>>> Stashed changes
 )
 state: TrainingState = init(batch_init, jax.random.PRNGKey(config.seed))
 
@@ -272,7 +267,7 @@ aimwriter.log_hparams(cfg_dict)
 
 actions = [
     actions.PeriodicCallback(
-        every_steps=1*steps_per_epoch,
+        every_steps=steps_per_epoch//8,
         callback_fn=lambda step, t, **kwargs: aimwriter.write_scalars(step, kwargs["metrics"])
     ),
     actions.PeriodicCallback(
