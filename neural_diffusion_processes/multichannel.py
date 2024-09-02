@@ -60,8 +60,8 @@ class ChannelAttentionLayer(hk.Module):
         s_i = rearrange(s_i, "batch_size seq_len input_dim channel hidden_dim -> batch_size channel seq_len input_dim hidden_dim")
 
         alpha = hk.get_parameter('alpha', [], init=jnp.zeros)
-        alpha = jax.lax.clamp(0.0, alpha, 1.0) # clamp to [0,1]
-        return alpha * s + (1-alpha) * s_i if not ignore_alpha else s
+        # alpha = jax.lax.clamp(0.0, alpha, 1.0) # clamp to [0,1]
+        return s + alpha * s_i if not ignore_alpha else s
 
 
 @dataclass
