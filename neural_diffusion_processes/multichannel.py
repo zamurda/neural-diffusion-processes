@@ -38,7 +38,8 @@ class ChannelAttentionLayer(hk.Module):
 
     @check_shapes(
         "s: [batch_size, channel, seq_len, input_dim, hidden_dim]",
-        "return: [batch_size, channel, seq_len, input_dim, hidden_dim]"
+        "return[0]: [batch_size, channel, seq_len, input_dim, hidden_dim]",
+        "return[1]: [batch_size, channel, seq_len, input_dim, hidden_dim]"
     )
     def __call__(self, s: jnp.ndarray, ignore_alpha: bool = False) -> jnp.ndarray:
         s = rearrange(s, 'batch_size channel seq_len input_dim hidden_dim -> batch_size seq_len input_dim channel hidden_dim')
