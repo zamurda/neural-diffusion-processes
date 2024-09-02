@@ -47,7 +47,7 @@ class ChannelAttentionLayer(hk.Module):
         
         mask = jnp.zeros((s.shape[0], 1, 1, 1, self.n_channels, self.n_channels))
         attn_layer = MultiHeadAttention(self.hidden_dim*2, self.num_heads)
-        s_enc = s
+        s_enc = s 
         s_i = attn_layer(s_enc, s_enc, s_enc, mask_type=mask) #[B, N, D, C, Hx2]
         
         # map s_i back down to hidden_dim
