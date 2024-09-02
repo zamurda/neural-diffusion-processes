@@ -219,16 +219,16 @@ class MultiChannelBDAM(hk.Module):
         skip = None
         for _ in range(self.n_layers):
             layer = BiDimensionalAttentionBlock(self.hidden_dim, self.num_heads)
-            x, skip_connection = layer(x, t_embedding, mask_type) #[(B C), N, D, H]            
+            x, skip_connection_1 = layer(x, t_embedding, mask_type) #[(B C), N, D, H]            
             
             # pass skip through the channel encoding block
             x =  rearrange(x, "(b c) n d h -> b c n d h", c=self.n_channels)
-            skip_connection = rearrange(skip_connection, "(b c) n d h -> b c n d h", c=self.n_channels)
-            x, skip_connection = ChannelAttentionLayer(self.num_heads, self.n_channels, self.hidden_dim)(x, self.ignore_alpha)
+            skip = rearrange(skip_connection_1, "(b c) n d h -> b c n d h", c=self.n_channels)
+            x, skip = ChannelAttentionLayer(self.num_heads, self.n_channels, self.hidden_dim)(x, self.ignore_alpha)
             x = rearrange(x, 'b c n d h -> (b c) n d h', c=self.n_channels)
-            skip_connection = rearrange(skip_connection, 'b c n d h -> (b c) n d h', c=self.n_channels)
+            skip_connection_2 = rearrange(skip, 'b c n d h -> (b c) n d h', c=self.n_channels)
 
-            skip = skip_connection if skip is None else skip_connection + skip
+            skip = (skip_connection_1 + skip_connection_2) if skip is None else (skip_connection_1 + skip_connection_2) + skip
 
         x = cs(x, "[batch_size, num_points, input_dim, hidden_dim]")
         skip = cs(skip, "[batch_size, num_points, input_dim, hidden_dim]")
