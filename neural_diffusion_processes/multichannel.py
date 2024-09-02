@@ -46,22 +46,26 @@ class ChannelAttentionLayer(hk.Module):
         
         mask = jnp.zeros((s.shape[0], 1, 1, 1, self.n_channels, self.n_channels))
         attn_layer = MultiHeadAttention(self.hidden_dim*2, self.num_heads)
-        s_enc = s + positional_encoding
+        s_enc = s
         s_i = attn_layer(s_enc, s_enc, s_enc, mask_type=mask) #[B, N, D, C, Hx2]
         
         # map s_i back down to hidden_dim
-        s_i = cs(
-            jax.nn.gelu(hk.Linear(self.hidden_dim)(s_i)),
-            "[batch_size, seq_len, input_dim, channel, hidden_dim]"
-        )
+        # s_i = cs(
+        #     jax.nn.gelu(hk.Linear(self.hidden_dim)(s_i)),
+        #     "[batch_size, seq_len, input_dim, channel, hidden_dim]"
+        # )
+        # implement same residual pattern as in BiDimensionalAttentionBlock
 
         # rearrange
         s = rearrange(s, "batch_size seq_len input_dim channel hidden_dim -> batch_size channel seq_len input_dim hidden_dim")
-        s_i = rearrange(s_i, "batch_size seq_len input_dim channel hidden_dim -> batch_size channel seq_len input_dim hidden_dim")
+        s_i = rearrange(s_i, "batch_size seq_len input_dim channel hidden_dim_x_2 -> batch_size channel seq_len input_dim hidden_dim_x_2")
+        res, skip = jnp.split(s_i, 2, axis=-1)
 
         alpha = hk.get_parameter('alpha', [], init=jnp.zeros)
-        # alpha = jax.lax.clamp(0.0, alpha, 1.0) # clamp to [0,1]
-        return s + alpha * s_i if not ignore_alpha else s
+        res = jax.nn.gelu(res)
+        skip = jax.nn.gelu(skip)
+        
+        return (s + alpha*res) / math.sqrt(2.0), skip
 
 
 @dataclass
@@ -199,8 +203,7 @@ class MultiChannelBDAM(hk.Module):
 )
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray, t: jnp.ndarray, mask_type: jnp.ndarray = jnp.array([[]])) -> jnp.ndarray:
         '''
-        Predicts the noise in each channel of input by interleaving the layers of a pretrained BiDimensionalAttentionModel with a 
-        "channel - encoding" layer.
+        Predicts the noise in each channel of input by interleaving the layers of BiDimensionalAttentionModel with a new ChannelAttentionLayer
         '''
 
         x = cs(self.process_inputs(x, y), "[batch_size, num_points, input_dim, 2]")
@@ -216,13 +219,16 @@ class MultiChannelBDAM(hk.Module):
         skip = None
         for _ in range(self.n_layers):
             layer = BiDimensionalAttentionBlock(self.hidden_dim, self.num_heads)
-            x, skip_connection = layer(x, t_embedding, mask_type) #[(B C), N, D, H]
-            skip = skip_connection if skip is None else skip_connection + skip
+            x, skip_connection = layer(x, t_embedding, mask_type) #[(B C), N, D, H]            
             
             # pass skip through the channel encoding block
-            skip = rearrange(skip, "(b c) n d h -> b c n d h", c=self.n_channels)
-            skip = ChannelAttentionLayer(self.num_heads, self.n_channels, self.hidden_dim)(skip, self.ignore_alpha)
-            skip = rearrange(skip, 'b c n d h -> (b c) n d h', c=self.n_channels)
+            x =  rearrange(x, "(b c) n d h -> b c n d h", c=self.n_channels)
+            skip_connection = rearrange(skip_connection, "(b c) n d h -> b c n d h", c=self.n_channels)
+            x, skip_connection = ChannelAttentionLayer(self.num_heads, self.n_channels, self.hidden_dim)(x, self.ignore_alpha)
+            x = rearrange(x, 'b c n d h -> (b c) n d h', c=self.n_channels)
+            skip_connection = rearrange(skip_connection, 'b c n d h -> (b c) n d h', c=self.n_channels)
+
+            skip = skip_connection if skip is None else skip_connection + skip
 
         x = cs(x, "[batch_size, num_points, input_dim, hidden_dim]")
         skip = cs(skip, "[batch_size, num_points, input_dim, hidden_dim]")
