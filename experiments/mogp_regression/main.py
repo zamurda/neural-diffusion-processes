@@ -21,7 +21,7 @@ import optax
 import equinox as eqx
 from functools import partial
 from dataclasses import asdict
-from data import gen_dataset, se_kernel, _MOGP_SAMPLES_PER_EPOCH
+from data import gen_dataset, make_batch, se_kernel, _MOGP_SAMPLES_PER_EPOCH
 import matplotlib.pyplot as plt
 from einops import rearrange
 
@@ -107,7 +107,7 @@ learning_rate_schedule = optax.warmup_cosine_decay_schedule(
 
 # purpose of label function is to assign 0 or 1 to parameter names for the multi_transform to the updates
 def label_fn(ptree):
-    labeller = lambda path, _: 0 if bool(re.search(r'(?:\w+/)*\bbi_dimensional_attention_block[_\d+]*\b(?:\/\w+)*', '/'.join(str(p) for p in path))) or bool(re.search('multi_channel_bdam/linear(?!_2)', '/'.join(str(p) for p in path))) else 1
+    labeller = lambda path, _: 1 if bool(re.search(r'(?:\w+/)*\bbi_dimensional_attention_block[_\d+]*\b(?:\/\w+)*', '/'.join(str(p) for p in path))) or bool(re.search('multi_channel_bdam/linear(?!_2)', '/'.join(str(p) for p in path))) else 1
     return jax.tree_util.tree_map_with_path(labeller, ptree)
 
 update_chain = optax.chain(
@@ -185,34 +185,85 @@ def update_step(state: TrainingState, batch: Batch) -> Tuple[TrainingState, Mapp
     }
     return new_state, metrics
 
-@jax.jit
-def sample_prior(key, x, model_fn, mask_type):
-    return process.sample(key, x, mask_type, model_fn=model_fn)
+def sample_prior(key, x, mask_type, model_fn):
+    return process.sample(key, x, mask_type, model_fn=model_fn, batched_input=True)
 
 @partial(jax.vmap, in_axes=(0,None,None,None))
 def sample_n_priors(keys, x, mask_type):
     model_fn = partial(net, state.params_ema)
     return sample_prior(keys, x, model_fn, mask_type)
 
+@partial(jax.vmap, in_axes=(0, None, None, None, None))
+def sample_n_conditionals(key, x_test, x_context, y_context, model_fn):
+    return process.batch_conditional_sample(
+        key, x_test, mask=MASK_TYPE_NOMASK, x_context=x_context, y_context=y_context, model_fn=model_fn)
 
 # prior and process plots
-def prior_plots(batch, state) -> None:
-    # n_channels = coreg_weights.shape[0]
-    # chosen_sample = jax.random.choice(jax.random.seed(53), jnp.arange(n_channels))
-    # x = rearrange(batch.x_target, '(b c) n d -> b c n d', c=n_channels)[chosen_sample]
-    # y = rearrange(batch.y_target, '(b c) n 1 -> b c n 1', c=n_channels)[chosen_sample]
-    # samples = sample_n_priors(jax.random.split(jax.random.key(42)), x, mask_type=MASK_TYPE_NOMASK)
-    # fig, ax = plt.subplots(n_channels, 2)
-    # for i in range(n_channels):
-    #     x = x[i].squeeze(-1)
-    #     args = x.argsort()
-    #     ax[i,0].plot(x[args], samples[...,0])
-    fig,ax = plt.subplots()
+def process_plots(batch, state, samplingkey) -> plt.figure:
+    ts = (500, 300, 200, 100, 50, 25, 1)
+    f,s,n = sample_prior(samplingkey, batch.x_target, mask_type=MASK_TYPE_NOMASK, model_fn=partial(net, state.params_ema))
+    plt.rcParams.update({'font.size': 10})
+    fig, ax = plt.subplots(4, len(ts), figsize=(12,6))
+    for i in range(4):
+        for j,t in enumerate(ts):
+            ax[i,j].scatter(batch.x_target[i], s[500-t,i], s=2,alpha=0.6)
+            ax[i,j].scatter(batch.x_target[i], n[500-t,i], s=2,alpha=0.6)
+            ax[i,j].set_title(f'C={i}, t={t}')
+    fig.suptitle('Denoised image through time')
+    fig.tight_layout()
+    fig.legend(['Denoised Prediction', 'Noise prediction'])
+
     return fig
 
-def process_plots(batch, state) -> None:
-    fig, ax = plt.subplots()
+def conditional_plots(batch, state, samplingkey) -> plt.figure:
+    num_ctx = 10
+
+    x_context = batch.x_target[:,:num_ctx,:]
+    y_context = batch.y_target[:,:num_ctx,:]
+    x_target = batch.x_target[:, num_ctx:, :]
+    y_target = batch.y_target[:, num_ctx:, :]
+
+    sampkeys = jax.random.split(samplingkey, 8)
+    n_condsamps = sample_n_conditionals(sampkeys, x_target, x_context, y_context, partial(net, state.params_ema))
+    mean, var = jnp.mean(n_condsamps, axis=0).squeeze(axis=-1), jnp.var(n_condsamps, axis=0).squeeze(axis=-1)
+    fig,ax = plt.subplots(1,4, figsize=(12,8))
+    for i in range(4):
+        args = x_target[i].squeeze(-1).argsort()
+        # ax[i].plot(x_target[i].squeeze(-1)[args], condsamps[i].squeeze(-1)[args])
+        ax[i].plot(x_target[i].squeeze(-1)[args], mean[i][args])
+        ax[i].fill_between(
+            x_target[i].squeeze(-1)[args],
+            mean[i][args] - 1.96*jnp.sqrt(var[i][args]),
+            mean[i][args] + 1.96*jnp.sqrt(var[i][args]),
+            color="k",
+            alpha=0.1
+        )
+        ax[i].scatter(x_context[i], y_context[i], c='red', label="context points")
+        ax[i].scatter(x_target[i], y_target[i], c='black', label="context points", s=6, marker="x")
+        ax[i].set_title(f"Output {i}")
+    fig.suptitle(f"Conditional samples from model when $step={state.step}$\nred=context, black=target, 10 context points.")
+    fig.tight_layout()
+
     return fig
+
+def create_plots(state, key) -> None:
+    # Create output directory if it doesn't exist
+    output_dir = SAVE_HERE/'plots'
+    os.makedirs(output_dir, exist_ok=True)
+    bkey, k1,k2 = jax.random.split(key, 3)
+
+    # Generate a testbatch
+    batch = make_batch(bkey, 1, kernels['se'], coreg_weights, 1, -1, 100)
+
+    # Call process_plots and save the figure
+    process_fig = process_plots(batch, state, k1)
+    process_fig.savefig(output_dir/f"process_plot_step_{state.step}.png")
+    plt.close(process_fig)
+
+    # Call conditional_plots and save the figure
+    conditional_fig = conditional_plots(batch, state, k2)
+    conditional_fig.savefig(output_dir/f"conditional_plot_step_{state.step}.png")
+    plt.close(conditional_fig)
 
 # load pretrained checkpoint
 pretrained_state: TrainingState = init_state_from_pickle(os.path.abspath(PRETRAINED_MODEL_DIR))
@@ -275,14 +326,8 @@ actions = [
         callback_fn=lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], SAVE_HERE, step)
     ),
     actions.PeriodicCallback(
-        every_steps=NUM_STEPS,
-        callback_fn=lambda step, t, **kwargs: aimwriter.write_figures(
-            step,
-            {
-                'prior samples':prior_plots(batch=kwargs['batch'], state=kwargs['state']),
-                'predicted noise':process_plots(batch=kwargs['batch'], state=kwargs['state'])
-            }
-        )
+        every_steps=1,
+        callback_fn=lambda step, t, **kwargs: create_plots(kwargs['state'], kwargs['key'])
     ),
     actions.PeriodicCallback(
         every_steps=1,
@@ -300,11 +345,12 @@ with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
 
     for step, batch in zip(progress_bar, ds_train):
         if step < state.step: continue  # wait for the state to catch up in case of restarts
+        if step >= 2: break
         state, metrics = update_step(state, batch)
         metrics["lr"] = learning_rate_schedule(state.step)
 
         for action in actions:
-            action(step, t=None, metrics=metrics, state=Params(state.params, state.params_ema, step), key=key, batch=batch, writer=csvwriter)
+            action(step, t=None, metrics=metrics, state=Params(state.params, state.params_ema, step), key=state.key, batch=batch, writer=csvwriter)
 
         if step % 100 == 0:
             progress_bar.set_description(f"loss {metrics['loss']:.2f}")
