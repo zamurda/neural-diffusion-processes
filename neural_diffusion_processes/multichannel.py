@@ -221,7 +221,7 @@ class MultiChannelBDAM(hk.Module):
             
             # pass skip through the channel encoding block
             skip = rearrange(skip, "(b c) n d h -> b c n d h", c=self.n_channels)
-            skip = ChannelAttentionLayer(self.num_heads, self.n_channels, self.hidden_dim)(skip)
+            skip = ChannelAttentionLayer(self.num_heads, self.n_channels, self.hidden_dim)(skip, self.ignore_alpha)
             skip = rearrange(skip, 'b c n d h -> (b c) n d h', c=self.n_channels)
 
         x = cs(x, "[batch_size, num_points, input_dim, hidden_dim]")
@@ -229,7 +229,7 @@ class MultiChannelBDAM(hk.Module):
 
         skip = cs(reduce(skip, "b n d h -> b n h", "mean"), "[batch, num_points, hidden_dim]")
 
-        eps = skip / math.sqrt(self.n_layers * 1.0)
+        eps = skip / math.sqrt(self.n_layers * 2 * 1.0)
         eps_hidden = jax.nn.gelu(hk.Linear(self.hidden_dim)(eps))
         if self.init_zero:
             eps = hk.Linear(1, w_init=jnp.zeros)(eps_hidden)

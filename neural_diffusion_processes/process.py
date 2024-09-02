@@ -66,7 +66,7 @@ class GaussianDiffusion:
         beta_t = expand_to(self.betas[t], yt)
         alpha_t = expand_to(self.alphas[t], yt)
         alpha_bar_t = expand_to(self.alpha_bars[t], yt)
-
+        t = t[0] if t.size > 0 and t.ndim > 0 else t
         z = (t > 0) * jax.random.normal(key, shape=yt.shape, dtype=yt.dtype)
 
         a = 1.0 / jnp.sqrt(alpha_t)
@@ -86,25 +86,31 @@ class GaussianDiffusion:
         v = jnp.maximum(v, jnp.ones_like(v) * 1e-3)
         return m, v
 
-    def sample(self, key, x, mask, *, model_fn: EpsModel, output_dim: int = 1):
+    def sample(self, key, x, mask, *, model_fn: EpsModel, batched_input: bool = False, output_dim: int = 1):
+        """returns the noise at each intermediate step too"""
+        
         key, ykey = jax.random.split(key)
-        yT = jax.random.normal(ykey, (len(x), output_dim))
-
-        if mask is None:
-            mask = jnp.zeros_like(x[:, 0])
-
+        
+        if batched_input:
+            shape = list(x.shape[:-1]) + [1] # make sure last dim of x is 1
+            yT = jax.random.normal(ykey, shape)
+            #yT = jnp.tile(jax.random.normal(ykey, shape[1:]), (x.shape[0], 1, 1)) #same starting noise
+            ts = jnp.tile(jnp.arange(len(self.betas))[::-1], (x.shape[0], 1)).T #[B, num_timesteps]
+        else:
+            yT = jax.random.normal(ykey, (len(x), output_dim))
+            ts = jnp.arange(len(self.betas))[::-1]
+        
         @jax.jit
         def scan_fn(y, inputs):
             t, key = inputs
             mkey, rkey = jax.random.split(key)
             noise_hat = model_fn(t, y, x, mask, key=mkey)
             y = self.ddpm_backward_step(key=rkey, noise=noise_hat, yt=y, t=t)
-            return y, None
+            return y, (y, noise_hat)
 
-        ts = jnp.arange(len(self.betas))[::-1]
         keys = jax.random.split(key, len(ts))
         yf, yt = jax.lax.scan(scan_fn, yT, (ts, keys))
-        return yt if yt is not None else yf
+        return yf, yt[0], yt[1]
 
     def conditional_sample(
         self,
@@ -167,6 +173,74 @@ class GaussianDiffusion:
         ts = jnp.arange(len(self.betas))[::-1]
         keys = jax.random.split(key, len(ts))
         yT_target = jax.random.normal(ykey, (len(x), y_context.shape[-1]))
+
+        y, _ = jax.lax.scan(repaint_outer, yT_target, (ts[:-1], keys[:-1]))
+        return y
+    
+    def batch_conditional_sample(
+    self,
+    key,
+    x,
+    mask,
+    *,
+    x_context,
+    y_context,
+    model_fn: EpsModel,
+    num_inner_steps: int = 5,
+    method: str = "repaint",
+):
+
+        key, ykey = jax.random.split(key)
+        x_augmented = jnp.concatenate([x_context, x], axis=1)
+        mask_augmented = mask
+        num_context = x_context.shape[1]
+        num_channels = x.shape[0]
+
+        @jax.jit
+        def repaint_inner(yt_target, inputs):
+            """
+            inner loop - forward and backwards num_innner steps times.
+            called via a scan over ts and keys of length num_inner
+            """
+            t, key = inputs
+            key, fkey, mkey, bkey = jax.random.split(key, 4)
+            # one step backward: t -> t-1
+            yt_context = self.forward(fkey, y_context, t)[0]
+            y_augmented = jnp.concatenate([yt_context, yt_target], axis=1)
+            noise_hat = model_fn(t.repeat(num_channels), y_augmented, x_augmented, mask_augmented, key=mkey)
+            y = self.ddpm_backward_step(key=bkey, noise=noise_hat, yt=y_augmented, t=t)
+            y = y[:,num_context:]
+            # one step forward: t-1 -> t
+            z = jax.random.normal(key, shape=y.shape)
+            beta__t_minus_1 = expand_to(self.betas[t - 1], y)
+            y = jnp.sqrt(1.0 - beta__t_minus_1) * y + jnp.sqrt(beta__t_minus_1) * z
+            return y, None
+
+        @jax.jit
+        def repaint_outer(y, inputs):
+            t, key = inputs #[],[]
+            # loop
+            key, ikey = jax.random.split(key)
+            ts = jnp.ones((num_inner_steps,), dtype=jnp.int32) * t
+            # ts = jnp.tile(t, (num_inner_steps,1)).astype(jnp.int32)
+            keys = jax.random.split(ikey, num_inner_steps)
+            y, _ = jax.lax.scan(repaint_inner, y, (ts, keys)) #scan inner loop num_inner_steps times, taking singula keys and ts
+
+            # step backward: t -> t-1
+            key, fkey, mkey, bkey = jax.random.split(key, 4)
+            yt_context = self.forward(fkey, y_context, t)[0]
+            y_augmented = jnp.concatenate([yt_context, y], axis=1)
+            noise_hat = model_fn(t.repeat(num_channels), y_augmented, x_augmented, mask_augmented, key=mkey) #expand t whenever inference is done
+            y = self.ddpm_backward_step(key=bkey, noise=noise_hat, yt=y_augmented, t=t)
+            y = y[:, num_context:]
+            return y, None
+
+        ts = jnp.arange(len(self.betas))[::-1]
+        keys = jax.random.split(key, len(ts))
+        yT_target = jax.random.normal(ykey, x.shape)
+
+        shape = list(x.shape[:-1]) + [1] # make sure last dim of x is 1
+        yT_target = jax.random.normal(ykey, shape)
 
         y, _ = jax.lax.scan(repaint_outer, yT_target, (ts[:-1], keys[:-1]))
         return y
@@ -263,7 +337,7 @@ def loss_multichannel(
         in the multichannel case, the loss is first averaged over the channel dimensions
         each output in a channel is forwarded with the same noise (so that latent alignment can take place)
         """
-        yt, noise = process.fwd_with_same_noise(key, y, t)
+        yt, noise = process.forward(key, y, t)
         t = t.repeat(y.shape[0])
         noise_hat = network(t, yt, x, mask_type, key=key)
         loss_value = jnp.mean(loss_metric(noise, noise_hat), axis=0).squeeze(-1)  # [N,]
