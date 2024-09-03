@@ -224,10 +224,10 @@ class MultiChannelBDAM(hk.Module):
             
             # pass skip through the channel encoding block
             x =  rearrange(x, "(b c) n d h -> b c n d h", c=self.n_channels)
-            skip = rearrange(skip_connection_1, "(b c) n d h -> b c n d h", c=self.n_channels)
-            x, skip = ChannelAttentionLayer(self.num_heads, self.n_channels, self.hidden_dim)(x, self.ignore_alpha)
+            # skip_con = rearrange(skip_connection_1, "(b c) n d h -> b c n d h", c=self.n_channels)
+            x, skip_con = ChannelAttentionLayer(self.num_heads, self.n_channels, self.hidden_dim)(x, self.ignore_alpha)
             x = rearrange(x, 'b c n d h -> (b c) n d h', c=self.n_channels)
-            skip_connection_2 = rearrange(skip, 'b c n d h -> (b c) n d h', c=self.n_channels)
+            skip_connection_2 = rearrange(skip_con, 'b c n d h -> (b c) n d h', c=self.n_channels)
 
             skip = (skip_connection_1 + skip_connection_2) if skip is None else (skip_connection_1 + skip_connection_2) + skip
 
