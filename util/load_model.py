@@ -14,7 +14,7 @@ from ml_tools.state_utils import TrainingState
 from ml_tools import state_utils
 
 from neural_diffusion_processes.model import BiDimensionalAttentionModel
-from neural_diffusion_processes.multichannel import MultiChannelEncodingModel
+from neural_diffusion_processes.multichannel import MultiChannelBDAM
 
 from .config_tools import NetworkConfig
 
