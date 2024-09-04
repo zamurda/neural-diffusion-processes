@@ -125,9 +125,11 @@ optimizer = optax.multi_transform(
 def network(t, y, x, mask_type):
     model = MultiChannelBDAM(
         n_layers=config.network.n_layers,
+        n_channels=num_channels,
         hidden_dim=config.network.hidden_dim,
         num_heads=config.network.num_heads,
-        n_channels=num_channels
+        init_zero=True,
+        use_channel_attention=False
     )
     return model(x, y, t, mask_type)
 
@@ -326,7 +328,7 @@ actions = [
         callback_fn=lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], SAVE_HERE, step)
     ),
     actions.PeriodicCallback(
-        every_steps=1,
+        every_steps=5*steps_per_epoch,
         callback_fn=lambda step, t, **kwargs: create_plots(kwargs['state'], kwargs['key'])
     ),
     actions.PeriodicCallback(
@@ -345,7 +347,6 @@ with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
 
     for step, batch in zip(progress_bar, ds_train):
         if step < state.step: continue  # wait for the state to catch up in case of restarts
-        if step >= 2: break
         state, metrics = update_step(state, batch)
         metrics["lr"] = learning_rate_schedule(state.step)
 
