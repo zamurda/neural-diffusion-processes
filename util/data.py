@@ -72,7 +72,9 @@ def gen_dataset_standard(
 
         key = jax.random.PRNGKey(seed)
         batched_indices = []
-        for _ in range((num_samples * training_config.num_epochs) // training_config.batch_size):
+        num_batches = (num_samples * training_config.num_epochs) // training_config.batch_size
+
+        """for _ in range(num_batches):
             curr_batch = []
             for __ in range(training_config.batch_size):
                 key, subkey = jax.random.split(key)
@@ -81,8 +83,24 @@ def gen_dataset_standard(
                 curr_batch.append(
                     jax.random.choice(subkey, indices, (dataset_config.sample_length,))
                 )
+            batched_indices.append(jnp.stack(curr_batch))"""
 
-            batched_indices.append(jnp.stack(curr_batch))
+        def get_sample_indices(key, indices, batch_size, sample_length):
+            return jax.random.choice(
+                key,
+                indices,
+                (
+                    batch_size,
+                    sample_length,
+                ),
+                replace=True,
+            )
+
+        keys = jax.random.split(key, num_batches)
+        batched_indices = jax.vmap(get_sample_indices, in_axes=(0, None, None, None))(
+            keys, indices, training_config.batch_size, dataset_config.sample_length
+        )
+
         if not target_is_normalised:
             mean = data[dataset_config.target_index].mean()
             std = data[dataset_config.target_index].std()
