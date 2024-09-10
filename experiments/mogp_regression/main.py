@@ -97,13 +97,14 @@ ds_train = gen_dataset(
 # init optimizer
 NUM_STEPS =  (_MOGP_SAMPLES_PER_EPOCH // config.training.batch_size) * config.training.num_epochs
 steps_per_epoch = NUM_STEPS // config.training.num_epochs
-learning_rate_schedule = optax.warmup_cosine_decay_schedule(
-    init_value=config.optimizer.init_lr,
-    peak_value=config.optimizer.peak_lr,
-    warmup_steps=steps_per_epoch * config.optimizer.num_warmup_epochs,
-    decay_steps=steps_per_epoch * config.optimizer.num_decay_epochs,
-    end_value=config.optimizer.end_lr,
-)
+# learning_rate_schedule = optax.warmup_cosine_decay_schedule(
+#     init_value=config.optimizer.init_lr,
+#     peak_value=config.optimizer.peak_lr,
+#     warmup_steps=steps_per_epoch * config.optimizer.num_warmup_epochs,
+#     decay_steps=steps_per_epoch * config.optimizer.num_decay_epochs,
+#     end_value=config.optimizer.end_lr,
+# )
+learning_rate_schedule = optax.constant_schedule(3e-4)
 
 # purpose of label function is to assign 0 or 1 to parameter names for the multi_transform to the updates
 def label_fn(ptree):
@@ -116,9 +117,7 @@ update_chain = optax.chain(
     optax.scale_by_schedule(learning_rate_schedule),
     optax.scale(-1.0),
 )
-optimizer = optax.multi_transform(
-    {1: update_chain, 0: optax.set_to_zero()}, param_labels=label_fn
-)
+optimizer = update_chain
 
 @hk.without_apply_rng
 @hk.transform
@@ -129,7 +128,6 @@ def network(t, y, x, mask_type):
         hidden_dim=config.network.hidden_dim,
         num_heads=config.network.num_heads,
         init_zero=True,
-        use_channel_attention=False
     )
     return model(x, y, t, mask_type)
 
@@ -152,15 +150,21 @@ def loss_fn(params, batch, key) -> jnp.ndarray:
     return ndp.process.loss_multichannel(process, net_with_params, batch, key, **kwargs)
 
 
-@jax.jit # fix or update
-def ema_update(decay, labels, ema_params, new_params):
-    def _ema(ema_params, new_params, label):
-        return jax.lax.cond(
-            label == 1,
-            lambda: decay * ema_params + (1.0 - decay) * new_params,
-            lambda: ema_params
-        )
-    return jax.tree.map(_ema, ema_params, new_params, labels) #jax upgraded
+# @jax.jit # fix or update
+# def ema_update(decay, labels, ema_params, new_params):
+#     def _ema(ema_params, new_params, label):
+#         return jax.lax.cond(
+#             label == 1,
+#             lambda: decay * ema_params + (1.0 - decay) * new_params,
+#             lambda: ema_params
+#         )
+#     return jax.tree.map(_ema, ema_params, new_params, labels) #jax upgraded
+
+@jax.jit
+def ema_update(decay, ema_params, new_params):
+    def _ema(ema_params, new_params):
+        return decay * ema_params + (1.0 - decay) * new_params
+    return jax.tree.map(_ema, ema_params, new_params)
 
 
 # update which only does wrt trainable params:
@@ -172,8 +176,8 @@ def update_step(state: TrainingState, batch: Batch) -> Tuple[TrainingState, Mapp
     loss_value, grads = loss_and_grad_fn(state.params, batch, loss_key)
     updates, new_opt_state = optimizer.update(grads, state.opt_state)
     new_params = optax.apply_updates(state.params, updates)
-    labels = label_fn(state.params)
-    new_params_ema = ema_update(config.optimizer.ema_rate, labels, state.params_ema, new_params)
+    # labels = label_fn(state.params)
+    new_params_ema = ema_update(config.optimizer.ema_rate, state.params_ema, new_params)
     new_state = TrainingState(
         params=new_params,
         params_ema=new_params_ema,
@@ -248,14 +252,17 @@ def conditional_plots(batch, state, samplingkey) -> plt.figure:
 
     return fig
 
-def create_plots(state, key) -> None:
+def create_plots(state, key, batch=None) -> None:
     # Create output directory if it doesn't exist
     output_dir = SAVE_HERE/'plots'
     os.makedirs(output_dir, exist_ok=True)
     bkey, k1,k2 = jax.random.split(key, 3)
 
     # Generate a testbatch
-    batch = make_batch(bkey, 1, kernels['se'], coreg_weights, 1, -1, 100)
+    if batch is None:
+        batch = make_batch(bkey, 1, kernels['se'], coreg_weights, 1, -1, 100)
+    else:
+        batch = batch
 
     # Call process_plots and save the figure
     process_fig = process_plots(batch, state, k1)
@@ -268,23 +275,23 @@ def create_plots(state, key) -> None:
     plt.close(conditional_fig)
 
 # load pretrained checkpoint
-pretrained_state: TrainingState = init_state_from_pickle(os.path.abspath(PRETRAINED_MODEL_DIR))
+# pretrained_state: TrainingState = init_state_from_pickle(os.path.abspath(PRETRAINED_MODEL_DIR))
 
-def traverse_and_switch(*, to_place, place_in):
-    for m, n, v in traverse(place_in):
-        pattern = (re.search(r'(?:\w+/)*\bbi_dimensional_attention_block[_\d+]*\b(?:\/\w+)*', m))
-        if bool(pattern): #if module name in new params contains bi_dimensional_attention_block
-            name = re.sub(r'^(?:\w+\/)*\bbi_dimensional_attention_block', 'bi_dimensional_attention_model/bi_dimensional_attention_block', m) #new params will be
-            v = to_place[name][n]
-        else:
-            v = v
-        # place back in
-        place_in[m][n] = v
-    # manually switch the linear layers
-    # linear, linear_1, linear_2
-    place_in['multi_channel_bdam/linear'] = to_place['bi_dimensional_attention_model/linear']
-    place_in['multi_channel_bdam/linear_1'] = to_place['bi_dimensional_attention_model/linear_1']
-    place_in['multi_channel_bdam/linear_2'] = to_place['bi_dimensional_attention_model/linear_2']
+# def traverse_and_switch(*, to_place, place_in):
+#     for m, n, v in traverse(place_in):
+#         pattern = (re.search(r'(?:\w+/)*\bbi_dimensional_attention_block[_\d+]*\b(?:\/\w+)*', m))
+#         if bool(pattern): #if module name in new params contains bi_dimensional_attention_block
+#             name = re.sub(r'^(?:\w+\/)*\bbi_dimensional_attention_block', 'bi_dimensional_attention_model/bi_dimensional_attention_block', m) #new params will be
+#             v = to_place[name][n]
+#         else:
+#             v = v
+#         # place back in
+#         place_in[m][n] = v
+#     # manually switch the linear layers
+#     # linear, linear_1, linear_2
+#     place_in['multi_channel_bdam/linear'] = to_place['bi_dimensional_attention_model/linear']
+#     place_in['multi_channel_bdam/linear_1'] = to_place['bi_dimensional_attention_model/linear_1']
+#     place_in['multi_channel_bdam/linear_2'] = to_place['bi_dimensional_attention_model/linear_2']
 
 @jax.jit
 def init(batch: Batch, key: Rng) -> TrainingState:
@@ -293,7 +300,7 @@ def init(batch: Batch, key: Rng) -> TrainingState:
     initial_params = network.init(
         init_rng, t=t, y=batch.y_target, x=batch.x_target, mask_type=MASK_TYPE_NOMASK
     )
-    traverse_and_switch(to_place=pretrained_state.params_ema, place_in=initial_params)
+    #traverse_and_switch(to_place=pretrained_state.params_ema, place_in=initial_params)
     initial_opt_state = optimizer.init(initial_params)
     return TrainingState(
         params=initial_params,
@@ -328,22 +335,30 @@ actions = [
         callback_fn=lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], SAVE_HERE, step)
     ),
     actions.PeriodicCallback(
-        every_steps=5*steps_per_epoch,
-        callback_fn=lambda step, t, **kwargs: create_plots(kwargs['state'], kwargs['key'])
+        every_steps=10*steps_per_epoch,
+        callback_fn=lambda step, t, **kwargs: create_plots(kwargs['state'], kwargs['key'], kwargs["testbatch"])
     ),
     actions.PeriodicCallback(
-        every_steps=1,
-        callback_fn=lambda step, t, **kwargs: kwargs['writer'].writerow([step, kwargs['metrics']['loss'], kwargs['metrics']['lr']])
+        every_steps=steps_per_epoch,
+        callback_fn=lambda step, t, **kwargs: kwargs['writer'].writerow(
+            [
+                step,
+                kwargs['metrics']['loss'],
+                kwargs['metrics']['lr'],
+                loss_fn(params=kwargs["state"].params_ema, batch=kwargs["testbatch"], key=kwargs["state"].key)
+            ]
+        )
     )
 ]
-
+dkey = jax.random.key(53)
+testbatch = make_batch(dkey, 1, kernels["se"], coreg_weights, 1, -1, 100)
 steps = range(state.step + 1, NUM_STEPS + 1)
 progress_bar = tqdm.tqdm(steps)
 
 
 with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
     csvwriter = csv.writer(csvfile, delimiter=',')
-    csvwriter.writerow(['step', 'loss', 'learning_rate'])
+    csvwriter.writerow(['step', 'loss', 'learning_rate', 'val_loss'])
 
     for step, batch in zip(progress_bar, ds_train):
         if step < state.step: continue  # wait for the state to catch up in case of restarts
@@ -351,10 +366,10 @@ with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
         metrics["lr"] = learning_rate_schedule(state.step)
 
         for action in actions:
-            action(step, t=None, metrics=metrics, state=Params(state.params, state.params_ema, step), key=state.key, batch=batch, writer=csvwriter)
+            action(step, t=None, metrics=metrics, state=Params(state.params, state.params_ema, step), key=state.key, batch=batch, writer=csvwriter, testbatch=testbatch)
 
-        if step % 100 == 0:
-            progress_bar.set_description(f"loss {metrics['loss']:.2f}")
+        if step % 32 == 0:
+            progress_bar.set_description(f"loss {metrics['loss']:.3f}")
 
 print(f'============================ {EXPERIMENT} finished training ===============================')
 dict_to_yaml(cfg_dict, SAVE_HERE/'config.yaml')
