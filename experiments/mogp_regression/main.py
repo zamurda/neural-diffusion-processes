@@ -209,8 +209,8 @@ def process_plots(batch, state, samplingkey) -> plt.figure:
     ts = (500, 300, 200, 100, 50, 25, 1)
     f,s,n = sample_prior(samplingkey, batch.x_target, mask_type=MASK_TYPE_NOMASK, model_fn=partial(net, state.params_ema))
     plt.rcParams.update({'font.size': 10})
-    fig, ax = plt.subplots(4, len(ts), figsize=(12,6))
-    for i in range(4):
+    fig, ax = plt.subplots(num_channels, len(ts), figsize=(12,6))
+    for i in range(num_channels):
         for j,t in enumerate(ts):
             ax[i,j].scatter(batch.x_target[i], s[500-t,i], s=2,alpha=0.6)
             ax[i,j].scatter(batch.x_target[i], n[500-t,i], s=2,alpha=0.6)
@@ -232,8 +232,8 @@ def conditional_plots(batch, state, samplingkey) -> plt.figure:
     sampkeys = jax.random.split(samplingkey, 8)
     n_condsamps = sample_n_conditionals(sampkeys, x_target, x_context, y_context, partial(net, state.params_ema))
     mean, var = jnp.mean(n_condsamps, axis=0).squeeze(axis=-1), jnp.var(n_condsamps, axis=0).squeeze(axis=-1)
-    fig,ax = plt.subplots(1,4, figsize=(12,8))
-    for i in range(4):
+    fig,ax = plt.subplots(1,num_channels, figsize=(12,8))
+    for i in range(num_channels):
         args = x_target[i].squeeze(-1).argsort()
         # ax[i].plot(x_target[i].squeeze(-1)[args], condsamps[i].squeeze(-1)[args])
         ax[i].plot(x_target[i].squeeze(-1)[args], mean[i][args])
@@ -336,7 +336,7 @@ actions = [
     ),
     actions.PeriodicCallback(
         every_steps=10*steps_per_epoch,
-        callback_fn=lambda step, t, **kwargs: create_plots(kwargs['state'], kwargs['key'], kwargs["testbatch"])
+        callback_fn=lambda step, t, **kwargs: create_plots(kwargs['state'], kwargs['key'], kwargs["plotbatch"])
     ),
     actions.PeriodicCallback(
         every_steps=steps_per_epoch,
@@ -345,13 +345,14 @@ actions = [
                 step,
                 kwargs['metrics']['loss'],
                 kwargs['metrics']['lr'],
-                loss_fn(params=kwargs["state"].params_ema, batch=kwargs["testbatch"], key=kwargs["state"].key)
+                loss_fn(params=kwargs["state"].params_ema, batch=kwargs["valbatch"], key=kwargs["key"])
             ]
         )
     )
 ]
 dkey = jax.random.key(53)
-testbatch = make_batch(dkey, 1, kernels["se"], coreg_weights, 1, -1, 100)
+plotbatch = make_batch(dkey, 1, kernels["se"], coreg_weights, 1, -1, 100)
+valbatch = make_batch(dkey, 32, kernels["se"], coreg_weights, 1, -1, 100)
 steps = range(state.step + 1, NUM_STEPS + 1)
 progress_bar = tqdm.tqdm(steps)
 
@@ -366,7 +367,7 @@ with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
         metrics["lr"] = learning_rate_schedule(state.step)
 
         for action in actions:
-            action(step, t=None, metrics=metrics, state=Params(state.params, state.params_ema, step), key=state.key, batch=batch, writer=csvwriter, testbatch=testbatch)
+            action(step, t=None, metrics=metrics, state=Params(state.params, state.params_ema, step), key=state.key, batch=batch, writer=csvwriter, plotbatch=plotbatch, valbatch=valbatch)
 
         if step % 32 == 0:
             progress_bar.set_description(f"loss {metrics['loss']:.3f}")
