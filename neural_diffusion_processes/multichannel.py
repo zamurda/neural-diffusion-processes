@@ -165,7 +165,7 @@ class MultiChannelBDAB(hk.Module):
         # )
 
         y_c = rearrange(y_att_n + y_att_d, "(b c) n d h -> b c n d h", c=self.n_channels, h=self.hidden_dim*2)
-        y_att_c = AttentiveSqueezeAndExcite(self.num_heads, self.hidden_dim*2, apply_residual=True)(y_c)
+        y_att_c = AttentiveSqueezeAndExcite(self.num_heads, self.hidden_dim*2, apply_residual=False)(y_c)
         
         y = rearrange(y_att_c, "b c n d h -> (b c) n d h", c=self.n_channels, h=self.hidden_dim*2)
         residual, skip = jnp.split(y, 2, axis=-1)
@@ -181,7 +181,6 @@ class MultiChannelBDAM(hk.Module):
     hidden_dim: int
     num_heads: int
     init_zero: bool = True
-    use_channel_attention: bool = True  # for ease of testing
 
     @check_shapes(
         "x: [batch_size, seq_len, input_dim]",
@@ -225,29 +224,13 @@ class MultiChannelBDAM(hk.Module):
 
         t_embedding = timestep_embedding(t, self.hidden_dim)
 
-        if self.use_channel_attention:
-            skip = None
-            scale = math.sqrt(self.n_layers * 2.0)
-            for _ in range(self.n_layers):
-                single_layer = BiDimensionalAttentionBlock(self.hidden_dim, self.num_heads)
-                x, skip1 = single_layer(x, t_embedding, mask_type)  # [(B C), N, D, H]
+        skip = None
+        scale = math.sqrt(self.n_layers * 1.0)
+        for _ in range(self.n_layers):
+            layer = MultiChannelBDAB(self.n_channels, self.hidden_dim, self.num_heads)
+            x, skip_con = layer(x, t_embedding, mask_type)  # [(B C) N D H]
 
-                channel_layer = ChannelAttentionLayer(
-                    self.num_heads, self.n_channels, self.hidden_dim
-                )
-                x, skip2 = channel_layer(x)
-
-                skips = skip1 + skip2
-                skip = skips if skip is None else skip + skips
-
-        else:
-            skip = None
-            scale = math.sqrt(self.n_layers * 1.0)
-            for _ in range(self.n_layers):
-                layer = MultiChannelBDAB(self.n_channels, self.hidden_dim, self.num_heads)
-                x, skip_con = layer(x, t_embedding, mask_type)  # [(B C) N D H]
-
-                skip = skip_con if skip is None else skip + skip_con
+            skip = skip_con if skip is None else skip + skip_con
 
         x = cs(x, "[batch_size, num_points, input_dim, hidden_dim]")
         skip = cs(skip, "[batch_size, num_points, input_dim, hidden_dim]")
