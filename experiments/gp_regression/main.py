@@ -14,12 +14,13 @@ import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 import optax
-# import equinox as eqx
+import equinox as eqx
 from functools import partial
 from dataclasses import asdict
-from data import gen_dataset, _SAMPLES_PER_EPOCH
+from data import gen_dataset, _SAMPLES_PER_EPOCH, se_kernel, make_batch
 import matplotlib.pyplot as plt
-from gpflow import kernels
+import pickle
+import csv
 
 # from ml_tools.config_utils import setup_config
 from ml_tools.state_utils import TrainingState
@@ -32,8 +33,16 @@ from neural_diffusion_processes.types import Dataset, Batch , Rng
 from neural_diffusion_processes.model import BiDimensionalAttentionModel
 from neural_diffusion_processes.process import cosine_schedule, GaussianDiffusion
 
+from util.config_tools import dict_to_yaml, yaml_to_dict
+
 from absl import flags # for training on apple gpu
 flags.DEFINE_bool('metal', False, "whether gpu training should occur")
+
+FLAGS = flags.FLAGS
+flags.FLAGS(sys.argv)
+if flags.FLAGS.metal:
+    os.environ['JAX_PLATFORMS'] = 'gpu'
+else: os.environ['JAX_PLATFORMS'] = 'cpu'
 
 from util.config_tools import get_config_map, parse_config_map, Config, DatasetConfig
 
@@ -41,7 +50,7 @@ timestamp = datetime.datetime.now().strftime("%b%d")
 letters = string.ascii_lowercase
 id = ''.join(random.choice(letters) for i in range(4))
 EXPERIMENTS_DIR = './trained_models'
-EXPERIMENT = f'gp_{timestamp}_{id}_testrun'
+EXPERIMENT = f'gp_{timestamp}_{id}_sanitycheck'
 # DATA_DIR = pathlib.Path('./data')
 # LOG_DIR = pathlib.Path('./logs')
 
@@ -61,8 +70,7 @@ process = GaussianDiffusion(beta_t)
 
 NUM_STEPS = (config.training.num_epochs * _SAMPLES_PER_EPOCH) // config.training.batch_size
 _kernels = {
-    'se': kernels.SquaredExponential(variance=1, lengthscales=0.25),
-    'matern32': kernels.Matern32(variance=1, lengthscales=0.25)
+    'se': partial(se_kernel, sigma2=1, l=0.25),
 }
 
 ds_train = gen_dataset(
@@ -239,44 +247,71 @@ batch_init = Batch(
 state: TrainingState = init(batch_init, jax.random.PRNGKey(config.seed))
 
 # sys.exit()
-writer = AimWriter(EXPERIMENT)
+aimwriter = AimWriter(EXPERIMENT)
 cfg_dict = asdict(config)
 cfg_dict['mask_type'] = 'no mask'
-writer.log_hparams(cfg_dict)
+aimwriter.log_hparams(cfg_dict)
 
 
 actions = [
     actions.PeriodicCallback(
-        every_steps=1,
-        callback_fn=lambda step, t, **kwargs: writer.write_scalars(step, kwargs["metrics"])
+        every_steps=NUM_STEPS,
+        callback_fn=lambda step, t, **kwargs: aimwriter.write_scalars(step, kwargs["metrics"])
     ),
     actions.PeriodicCallback(
-        every_steps=steps_per_epoch,
+        every_steps=10*steps_per_epoch,
         callback_fn=lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], SAVE_HERE, step)
     ),
     actions.PeriodicCallback(
-        every_steps=2*steps_per_epoch,
-        callback_fn=lambda step, t, **kwargs:writer.write_figures(
-            step,
-            {
-                'prior samples':prior_plots(batch=kwargs['batch'], state=kwargs['state']),
-                'predicted noise':process_plots(state=kwargs['state'])
-            }
+        every_steps=steps_per_epoch,
+        callback_fn=lambda step, t, **kwargs: kwargs['writer'].writerow(
+            [
+                step,
+                kwargs['metrics']['loss'],
+                kwargs['metrics']['lr'],
+                loss_fn(params=kwargs["state"].params_ema, batch=kwargs["valbatch"], key=kwargs["key"])
+            ]
         )
     ),
+    # actions.PeriodicCallback(
+    #     every_steps=2*steps_per_epoch,
+    #     callback_fn=lambda step, t, **kwargs:writer.write_figures(
+    #         step,
+    #         {
+    #             'prior samples':prior_plots(batch=kwargs['batch'], state=kwargs['state']),
+    #             'predicted noise':process_plots(state=kwargs['state'])
+    #         }
+    #     )
+    # ),
 ]
 
+class Params(eqx.Module):
+    params: dict
+    params_ema: dict
+    step: int
+
+dkey = jax.random.key(53)
+plotbatch = make_batch(dkey, 1, 100, _kernels["se"], -1, 1)
+valbatch = make_batch(dkey, 32, 100, _kernels["se"], -1, 1)
 steps = range(state.step + 1, NUM_STEPS + 1)
 progress_bar = tqdm.tqdm(steps)
 
-for step, batch in zip(progress_bar, ds_train):
-    if step < state.step: continue  # wait for the state to catch up in case of restarts
+with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
+    csvwriter = csv.writer(csvfile, delimiter=',')
+    csvwriter.writerow(['step', 'loss', 'learning_rate', 'val_loss'])
 
-    state, metrics = update_step(state, batch)
-    metrics["lr"] = learning_rate_schedule(state.step)
+    for step, batch in zip(progress_bar, ds_train):
+        if step < state.step: continue  # wait for the state to catch up in case of restarts
+        state, metrics = update_step(state, batch)
+        metrics["lr"] = learning_rate_schedule(state.step)
 
-    for action in actions:
-        action(step, t=None, metrics=metrics, state=state, key=key, batch=batch)
+        for action in actions:
+            action(step, t=None, metrics=metrics, state=Params(state.params, state.params_ema, step), key=state.key, batch=batch, writer=csvwriter, plotbatch=plotbatch, valbatch=valbatch)
 
-    if step % 100 == 0:
-        progress_bar.set_description(f"loss {metrics['loss']:.2f}")
+        if step % 32 == 0:
+            progress_bar.set_description(f"loss {metrics['loss']:.3f}")
+
+print(f'============================ {EXPERIMENT} finished training ===============================')
+dict_to_yaml(cfg_dict, SAVE_HERE/'config.yaml')
+with open(SAVE_HERE/'latest_trainingstate.pkl', 'wb') as file:
+    pickle.dump(Params(state.params, state.params_ema, state.step), file)

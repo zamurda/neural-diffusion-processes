@@ -1,7 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import gpflow
-import tensorflow as tf
 import jax.numpy as jnp
 import jax
 import jax.dlpack
@@ -14,32 +12,25 @@ from neural_diffusion_processes.types import Batch, Dataset, Rng
 
 _SAMPLES_PER_EPOCH = 4096
 
-matern = gpflow.kernels.Matern32(variance=1, lengthscales=0.25)
-se = gpflow.kernels.SquaredExponential(variance=1, lengthscales=0.25)
 
-def tf_to_jax(arr):
-    return jax.dlpack.from_dlpack(tf.experimental.dlpack.to_dlpack(arr))
-
-def jax_to_tf(arr):
-    return tf.experimental.dlpack.from_dlpack(jax.dlpack.to_dlpack(arr))
-
-# @jax.jit(static_argnums=(1,2))
-# def se_kernel(x, var, l):
-#     assert(len(x.shape) == 2 and x.shape[-1] == 1)
-
-#     K = jnp.ones(shape=(x.shape[0], x.shape[0]))
-    # for i in range()
+def se_kernel(X: jnp.ndarray, sigma2: jnp.float32, l: jnp.float32) -> jnp.ndarray:
+    """ 
+    Computes the full squared-exponential kernel matrix for an input data matrix.
+    """
+    sq_dists = jnp.sum((X[:, None, :] - X[None, :, :]) ** 2, axis=-1)
+    K = sigma2 * jnp.exp(-sq_dists / (2 * l ** 2))
+    return K
 
 
 def make_batch(key, batch_size: int, sample_length:int, kern, xlow, xhigh) -> Batch:
     xkey, ykey, nkey = jax.random.split(key, 3)
-
-    X = jax.random.uniform(xkey, shape=(batch_size,sample_length), minval=xlow, maxval=xhigh)
-    Ks = [kern(X[i].reshape(sample_length,1)) for i in range(batch_size)]
-    samples = np.stack([jax.random.multivariate_normal(ykey, jnp.array([0]*sample_length), tf_to_jax(Ks[i]), method='svd') for i in range(batch_size)])
-    # X = rearrange(X[...,None], 'input_dim batch_size seq_len -> batch_size seq_len input_dim')
-    del Ks # don't wait for GC
-    return Batch(x_target=X[...,None], y_target=samples[...,None]) # are the shapes right?
+    samplekeys = jax.random.split(ykey,batch_size)
+    X = jax.random.uniform(xkey, shape=(batch_size,sample_length,1), minval=xlow, maxval=xhigh) #[B,N,1]
+    # K = kern(X)
+    # Ks = [kern(X[i].reshape(sample_length,1)) for i in range(batch_size)]
+    # samples = np.stack([jax.random.multivariate_normal(ykey, jnp.array([0]*sample_length), tf_to_jax(Ks[i]), method='svd') for i in range(batch_size)])
+    samples = jax.vmap(lambda x,key: jax.random.multivariate_normal(key, jnp.array([0] * sample_length), kern(x), method="svd"), in_axes=(0,0))(X,samplekeys)
+    return Batch(x_target=X, y_target=samples[...,None]) # are the shapes right?  
 
 def gen_dataset(num_epochs: int, **kwargs) -> Dataset:
     num_batches = num_epochs * (_SAMPLES_PER_EPOCH // kwargs['batch_size'])
@@ -55,7 +46,7 @@ def gen_dataset(num_epochs: int, **kwargs) -> Dataset:
     key = jax.random.key(53)
     keys = jax.random.split(key, num_batches)
 
-    return map(partial_make_batch, keys)
+    return map(jax.jit(partial_make_batch), keys)
 
 
 if __name__ == '__main__':
