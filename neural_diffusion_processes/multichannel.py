@@ -61,8 +61,9 @@ class AttentiveSqueezeAndExcite(hk.Module):
 
         # broadcast over the input
         out = cs(excite[..., None, None, :] * s, "[batch_size, channel, seq_len, input_dim, hidden_dim]")'''
-        excitation_layer = SqueezeAndExcite(squeeze_over_axes=(1,2), inter_dim=s.shape[1]*2)
-        out = excitation_layer(attended_squeeze)
+        excitation_layer = SqueezeAndExcite(squeeze_over_axes=(2), inter_dim=s.shape[1]*2)
+        excite = excitation_layer(attended_squeeze) # [B, C, H]
+        out = s * excite[..., None, None, :] # broadcast over input tensor
         return s + out if self.apply_residual else out
 
 
