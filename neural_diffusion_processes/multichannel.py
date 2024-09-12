@@ -82,7 +82,7 @@ class SqueezeAndExcite(hk.Module):
         squeezed = jnp.mean(s, axis=self.squeeze_over_axes)
         
         reduction = jax.nn.gelu(
-            hk.Linear(output_size=self.inter_dim)(s) #[B, R]
+            hk.Linear(output_size=self.inter_dim)(squeezed) #[B, R]
         )
         excitation = jax.nn.sigmoid(
             hk.Linear(output_size=channels)(reduction) #[B, C]
