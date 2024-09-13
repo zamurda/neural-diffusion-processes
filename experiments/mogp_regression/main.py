@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 from einops import rearrange
 
 # from ml_tools.config_utils import setup_config
-from ml_tools.state_utils import TrainingState
+from ml_tools.state_utils import TrainingState, load_checkpoint
 from ml_tools import state_utils
 from ml_tools.writers import AimWriter
 from ml_tools import actions
@@ -55,7 +55,7 @@ MASK_TYPE_NOMASK = jnp.array([[]])
 
 config_map: Mapping = get_config_map()
 config: Config = parse_config_map(config_map)
-key = jax.random.PRNGKey(config.seed)
+key = jax.random.PRNGKey(53)
 beta_t = cosine_schedule(config.diffusion.beta_start, config.diffusion.beta_end, config.diffusion.timesteps)
 process = GaussianDiffusion(beta_t)
 
@@ -66,7 +66,7 @@ timestamp = datetime.datetime.now().strftime("%b%d")
 letters = string.ascii_lowercase
 id = ''.join(random.choice(letters) for i in range(4))
 EXPERIMENTS_DIR = './trained_models'
-EXPERIMENT = f'mogp_{timestamp}_{id}'
+EXPERIMENT = f'mogp_{timestamp}_{id}_old_excite_posenc'
 
 SAVE_HERE = pathlib.Path(EXPERIMENTS_DIR)/pathlib.Path(EXPERIMENT)
 if not SAVE_HERE.exists():
@@ -79,7 +79,7 @@ class Params(eqx.Module):
 
 # generate MOGP data
 kernels = {'se': partial(se_kernel, sigma2=1, l=0.35)}
-num_channels = 4
+num_channels = 2
 num_latents = 2
 weightskey, datasetkey = jax.random.split(key)
 coreg_weights = jax.random.normal(weightskey, (num_channels, num_latents))
@@ -317,6 +317,10 @@ batch_init = Batch(
     y_target=jnp.zeros((config.training.batch_size * num_channels, config.dataset.sample_length, 1)),
 )
 state: TrainingState = init(batch_init, jax.random.PRNGKey(config.seed))
+#pretrained_checkpoint, at_step = "./trained_models/mogp_Sep12_bvyk_overfit_3", 39680 
+#load_pretrained = load_checkpoint(Params(state.params, state.params_ema, state.step), pretrained_checkpoint, at_step)
+#state = TrainingState(params=load_pretrained.params, params_ema=load_pretrained.params_ema, opt_state=state.opt_state, key=state.key, step=load_pretrained.step)
+#SAVE_HERE, EXPERIMENT = pathlib.Path(pretrained_checkpoint), pretrained_checkpoint
 
 aimwriter = AimWriter(EXPERIMENT)
 cfg_dict = asdict(config)
@@ -351,15 +355,17 @@ actions = [
     )
 ]
 dkey = jax.random.key(53)
-plotbatch = make_batch(dkey, 1, kernels["se"], coreg_weights, 1, -1, 100)
-valbatch = make_batch(dkey, 32, kernels["se"], coreg_weights, 1, -1, 100)
-steps = range(state.step + 1, NUM_STEPS + 1)
+#plotbatch = make_batch(dkey, 1, kernels["se"], coreg_weights, 1, -1, 100)
+valbatch = make_batch(dkey, config.training.batch_size, kernels["se"], coreg_weights, 1, -1, 100)
+plotbatch = Batch(x_target=valbatch.x_target[:num_channels], y_target=valbatch.y_target[:num_channels], x_context=None, y_context=None)
+steps = range(state.step + 1, state.step + NUM_STEPS + 1)
 progress_bar = tqdm.tqdm(steps)
 
-
-with open(SAVE_HERE/'metrics.csv', 'w') as csvfile:
+print(f"Starting experiment {EXPERIMENT}")
+with open(SAVE_HERE/'metrics.csv', 'a') as csvfile:
     csvwriter = csv.writer(csvfile, delimiter=',')
-    csvwriter.writerow(['step', 'loss', 'learning_rate', 'val_loss'])
+    if state.step <= 1:
+        csvwriter.writerow(['step', 'loss', 'learning_rate', 'val_loss'])
 
     for step, batch in zip(progress_bar, ds_train):
         if step < state.step: continue  # wait for the state to catch up in case of restarts
