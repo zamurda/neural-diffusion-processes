@@ -16,7 +16,9 @@ venv/
 
 # testing files
 test.py
+*.ipynb
 
 # stored training data
 data/
 *.npy
+*.pkl

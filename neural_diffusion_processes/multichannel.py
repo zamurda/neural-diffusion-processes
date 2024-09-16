@@ -10,33 +10,9 @@ from check_shapes import check_shape as cs
 from einops import rearrange, reduce
 
 from .model import (
-    BiDimensionalAttentionModel,
-    BiDimensionalAttentionBlock,
     MultiHeadAttention,
     timestep_embedding,
 )
-from .process import EpsModel
-
-@dataclass
-class ChannelConvolutionLayer(hk.Module):
-    @check_shapes(
-        "s: [batch_size, channel, seq_len, input_dim, hidden_dim]",
-        "return: [batch_size, channel, seq_len, input_dim, hidden_dim]",
-    )
-    def __call__(self, s: jnp.ndarray, ignore_alpha: bool = False) -> jnp.ndarray:
-        kernelshape, hidden_dim = (self.kernel_depth, 1, 1), s.shape[-1]
-        s = rearrange(
-            s,
-            "batch_size, channel, seq_len, input_dim, hidden_dim -> batch_size, hidden_dim, channel, seq_len, input_dim",
-        )
-        s_i = hk.Conv3D(hidden_dim, kernelshape, padding="SAME")(s)
-        s_i = rearrange(
-            jax.nn.gelu(s_i),
-            "batch_size, hidden_dim, channel, seq_len, input_dim -> batch_size, channel, seq_len, input_dim, hidden_dim",
-        )
-
-        alpha = hk.get_parameter("alpha", [], init=jnp.zeros)
-        return alpha * s + (1 - alpha) * s_i if not ignore_alpha else s
 
 
 @dataclass
@@ -47,23 +23,23 @@ class AttentiveSqueezeAndExcite(hk.Module):
 
     @check_shapes(
         "s: [batch_size, channel, seq_len, input_dim, hidden_dim]",
-        "return: [batch_size, channel, seq_len, input_dim, hidden_dim]"
+        "return: [batch_size, channel, seq_len, input_dim, hidden_dim]",
     )
     def __call__(self, s: jnp.ndarray) -> jnp.ndarray:
-        
         # global avg pool acros [N, D]
         squeezed = reduce(s, "b c n d h -> b c h", reduction="mean")
-        mask = cs(jnp.zeros((s.shape[0], s.shape[1], s.shape[1]))[:,None,...], "[batch_size, 1, channel, channel]")
-        attended_squeeze = MultiHeadAttention(self.hidden_dim, self.num_heads)(squeezed, squeezed, squeezed, mask)
+        mask = cs(
+            jnp.zeros((s.shape[0], s.shape[1], s.shape[1]))[:, None, ...],
+            "[batch_size, 1, channel, channel]",
+        )
+        attended_squeeze = MultiHeadAttention(self.hidden_dim, self.num_heads)(
+            squeezed, squeezed, squeezed, mask
+        )
 
-        '''# apply sigmoid to scale to [0,1]
-        excite = jax.nn.sigmoid(excite) # maybe don't need a nonlinearity here...
+        excitation_layer = SqueezeAndExcite(squeeze_over_axes=(2), inter_dim=s.shape[1] * 2)
+        excite = excitation_layer(attended_squeeze)  # [B, C]
 
-        # broadcast over the input
-        out = cs(excite[..., None, None, :] * s, "[batch_size, channel, seq_len, input_dim, hidden_dim]")'''
-        excitation_layer = SqueezeAndExcite(squeeze_over_axes=(2), inter_dim=s.shape[1]*2)
-        excite = excitation_layer(attended_squeeze) # [B, C, H]
-        out = s * excite[..., None, None, :] # broadcast over input tensor
+        out = s * excite[..., None, None, None]  # broadcast over input tensor
         return s + out if self.apply_residual else out
 
 
@@ -71,70 +47,22 @@ class AttentiveSqueezeAndExcite(hk.Module):
 class SqueezeAndExcite(hk.Module):
     squeeze_over_axes: Tuple[int]
     inter_dim: int
-    apply_residual: bool = False
 
-    @check_shapes(
-        "s: [batch_size, channel, ...]",
-        "return: [batch_size, channel, ...]"
-    )
+    @check_shapes("s: [batch_size, channel, ...]", "return: [batch_size, channel]")
     def __call__(self, s: jnp.ndarray) -> jnp.ndarray:
         channels = s.shape[1]
         squeezed = jnp.mean(s, axis=self.squeeze_over_axes)
-        
+
         reduction = jax.nn.gelu(
-            hk.Linear(output_size=self.inter_dim)(squeezed) #[B, R]
+            hk.Linear(output_size=self.inter_dim)(squeezed)  # [B, R]
         )
         excitation = jax.nn.sigmoid(
-            hk.Linear(output_size=channels)(reduction) #[B, C]
+            hk.Linear(output_size=channels)(reduction)  # [B, C]
         )
 
-        shape = list(s.shape[:2]) + ([1] * len(s.shape[2:]))
-        out = jnp.reshape(excitation, shape) * s
-        return s + out if self.apply_residual else out
+        return excitation
 
 
-@dataclass
-class ChannelAttentionLayer(hk.Module):
-    num_heads: int
-    n_channels: int
-    hidden_dim: int
-
-    @check_shapes(
-        "s: [batch_size_x_channel, seq_len, input_dim, hidden_dim]",
-        "return[0]: [batch_size_x_channel, seq_len, input_dim, hidden_dim]",
-        "return[1]: [batch_size_x_channel, seq_len, input_dim, hidden_dim]",
-    )
-    def __call__(self, s: jnp.ndarray, ignore_alpha: bool = False) -> jnp.ndarray:
-        s = rearrange(s, "(b c) n d h -> b n d c h", c=self.n_channels)
-
-        positional_encoding = timestep_embedding(
-            jnp.arange(self.n_channels), embedding_dim=self.hidden_dim, max_positions=1_000
-        )[None, None, None, ...]  # positional encodings [1, 1, 1, C, H]
-        mask = jnp.zeros((s.shape[0], 1, 1, 1, self.n_channels, self.n_channels))
-        attn_layer = MultiHeadAttention(self.hidden_dim * 2, self.num_heads)
-        s_enc = s
-        s_i = attn_layer(s_enc, s_enc, s_enc, mask_type=mask)  # [B, N, D, C, Hx2]
-
-        # map s_i back down to hidden_dim
-        # s_i = cs(
-        #     jax.nn.gelu(hk.Linear(self.hidden_dim)(s_i)),
-        #     "[batch_size, seq_len, input_dim, channel, hidden_dim]"
-        # )
-        # implement same residual pattern as in BiDimensionalAttentionBlock
-
-        # rearrange
-        s = rearrange(s, "b n d c h -> (b c) n d h", c=self.n_channels, h=self.hidden_dim)
-        s_i = rearrange(s_i, "b n d c h -> (b c) n d h", c=self.n_channels, h=2 * self.hidden_dim)
-        res, skip = jnp.split(s_i, 2, axis=-1)
-
-        # alpha = hk.get_parameter('alpha', [], init=jnp.zeros)
-        res = jax.nn.gelu(res)
-        skip = jax.nn.gelu(skip)
-
-        return (s + res) / math.sqrt(2.0), skip
-
-
-@dataclass
 class MultiChannelBDAB(hk.Module):
     n_channels: int  # number of channels
     hidden_dim: int
@@ -165,7 +93,6 @@ class MultiChannelBDAB(hk.Module):
 
         y_r = cs(jnp.swapaxes(y, 1, 2), "[batch_size_x_channel, input_dim, num_points, hidden_dim]")
 
-
         y_att_n = MultiHeadAttention(2 * self.hidden_dim, self.num_heads)(y_r, y_r, y_r, mask_type)
         y_att_n = cs(y_att_n, "[batch_size_x_channel, input_dim, num_points, hidden_dim_x2]")
         y_att_n = cs(
@@ -173,32 +100,18 @@ class MultiChannelBDAB(hk.Module):
             "[batch_size_x_channel, num_points, input_dim, hidden_dim_x2]",
         )
 
-        # split dimensions and apply attention over channel dim
-        # y_c = rearrange(y, "(b c) n d h -> b n d c h", c=self.n_channels, h=self.hidden_dim)
-
-        # mask = jnp.zeros((y_c.shape[0], 1, 1, 1, self.n_channels, self.n_channels))
-        # y_att_c = MultiHeadAttention(2 * self.hidden_dim, self.num_heads)(y_c, y_c, y_c, mask)
-
-        # y_att_c = rearrange(
-        #     y_att_c, "b n d c h -> (b c) n d h", c=self.n_channels, h=2 * self.hidden_dim
-        # )
-
-        # y = cs(
-        #     y_att_n + y_att_d + y_att_c,
-        #     "[batch_size_x_channel, num_points, input_dim, hidden_dim_x2]",
-        # )
-
         y_c = rearrange(
             jax.nn.gelu(y_att_n + y_att_d),
             "(b c) n d h -> b c n d h",
-            c=self.n_channels, h=self.hidden_dim*2
+            c=self.n_channels,
+            h=self.hidden_dim * 2,
         )
-        y_att_c = AttentiveSqueezeAndExcite(self.num_heads, self.hidden_dim*2, apply_residual=False)(y_c)
-        
-        y = rearrange(y_att_c, "b c n d h -> (b c) n d h", c=self.n_channels, h=self.hidden_dim*2)
+        y_att_c = AttentiveSqueezeAndExcite(
+            self.num_heads, self.hidden_dim * 2, apply_residual=False
+        )(y_c)
+
+        y = rearrange(y_att_c, "b c n d h -> (b c) n d h", c=self.n_channels, h=self.hidden_dim * 2)
         residual, skip = jnp.split(y, 2, axis=-1)
-        # residual = jax.nn.gelu(residual)
-        # skip = jax.nn.gelu(skip)
         return (s + residual) / math.sqrt(2.0), skip
 
 

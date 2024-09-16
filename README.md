@@ -5,6 +5,10 @@
 
 This repository contains the code for the paper [Neural Diffusion Processes](https://arxiv.org/abs/2206.03992) by Vincent Dutordoir, Alan Saul, Zoubin Ghahramani and Fergus Simpson accepted at ICML 2023.
 
+## New additions
+
+In `multichannel.py` you can find a new kind of multi-output Neural Diffusion Process model which allows for learning (and sampling) from processes over heterotopic inputs.
+
 ## Installation
 
 The code is written in Python and uses the jax framework with the haiku deep learning library. The code has been tested on ubuntu linux with Python 3.9 and 3.10.
@@ -25,8 +29,9 @@ Instructions to reproduce the paper's experiments can be found in the readme fil
 To install the dependencies for the experiments, run the following command:
 ```
 poetry install --with experiments
+pip install git+https://github.com/vdutor/ml-tools.git@c66527fcfc0f985ba134ce38a6f62c0b4b300ad9
 ```
-This commands installs a lot of extra dependecies that are required for the experiments, such as [aim](https://aimstack.io/) (for experiment tracking), [ml-tools](https://github.com/vdutor/ml-tools), `tensorflow-cpu` (for data loading), etc.
+This commands installs a lot of extra dependencies that are required for the experiments, such as [aim](https://aimstack.io/) (for experiment tracking), [ml-tools](https://github.com/vdutor/ml-tools), `tensorflow-cpu` (for data loading), etc. Note that ml-tools is installed separately due to dependency versioning issues, however the code still works as-is, you may need to upgrade libraries such as equinox, optax, and haiku afterwards.
 
 ### GPU support
 Note that we do not install `jaxlib` by default, which is required for GPU support. To install `jaxlib` with GPU support for your machine following the official instructions [here](https://github.com/google/jax#installation).
